@@ -60,12 +60,12 @@ GRANT ALL PRIVILEGES ON DATABASE Secret_message TO botuser;
 
 ```env
 TELEGRAM_BOT_TOKEN=your_bot_token_here
-BOT_PASSWORD=12391
+BOT_PASSWORD=
 ADMIN_ID=your_telegram_id
 
 # PostgreSQL Database
 DB_HOST=localhost
-DB_PORT=5432
+DB_PORT=
 DB_NAME=Secret_message
 DB_USER=botuser
 DB_PASSWORD=your_secure_password
