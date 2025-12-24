@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.venv/
+venv/
+# Environment variables
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+
+# Database
+*.sqlite3
+*.db
+
+# Media files
+saved_media/
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Backup files
+bot_backup.py
+bot_old.py
+bot_sqlite.py
+owner_id.txt
+
+# VSCode
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
