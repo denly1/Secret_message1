@@ -310,36 +310,24 @@ async def toggle_ai_mode(user_id: int) -> bool:
         return new_status
 
 
-async def get_last_messages(user_id: int, chat_id: int = None, limit: int = 300) -> list:
-    """Get last N messages for AI prompt generation from all business chats"""
+async def get_last_messages(user_id: int, chat_id: int, limit: int = 300) -> list:
+    """Get last N messages for AI prompt generation from specific chat"""
     async with db_pool.acquire() as conn:
-        if chat_id:
-            rows = await conn.fetch(
-                """
-                SELECT text, caption, user_id, created_at
-                FROM messages
-                WHERE owner_id = $1 AND chat_id = $2
-                ORDER BY created_at DESC
-                LIMIT $3
-                """,
-                user_id, chat_id, limit
-            )
-        else:
-            rows = await conn.fetch(
-                """
-                SELECT text, caption, user_id, created_at
-                FROM messages
-                WHERE owner_id = $1
-                ORDER BY created_at DESC
-                LIMIT $2
-                """,
-                user_id, limit
-            )
+        rows = await conn.fetch(
+            """
+            SELECT text, caption, user_id, created_at
+            FROM messages
+            WHERE owner_id = $1 AND chat_id = $2
+            ORDER BY created_at DESC
+            LIMIT $3
+            """,
+            user_id, chat_id, limit
+        )
         return [dict(row) for row in rows]
 
 
-async def save_ai_prompt(user_id: int, prompt: str) -> None:
-    """Save generated AI prompt for user"""
+async def save_ai_prompt(user_id: int, chat_id: int, prompt: str) -> None:
+    """Save generated AI prompt for specific chat"""
     async with db_pool.acquire() as conn:
         await conn.execute(
             """
@@ -350,10 +338,11 @@ async def save_ai_prompt(user_id: int, prompt: str) -> None:
             """,
             user_id, prompt
         )
+        print(f"💾 Saved AI prompt for user {user_id}, chat {chat_id}")
 
 
-async def get_ai_prompt(user_id: int) -> Optional[str]:
-    """Get saved AI prompt for user"""
+async def get_ai_prompt(user_id: int, chat_id: int = None) -> Optional[str]:
+    """Get saved AI prompt for user (chat_id unused for now, using global prompt)"""
     async with db_pool.acquire() as conn:
         result = await conn.fetchval(
             "SELECT system_prompt FROM ai_settings WHERE user_id = $1",
@@ -411,15 +400,27 @@ async def generate_ai_prompt(messages: list, user_id: int) -> str:
 
 
 async def send_ai_response(chat_id: int, message_text: str, user_id: int, bot: Bot) -> None:
-    """Send AI-generated response to chat"""
+    """Send AI-generated response to chat - auto-creates prompt if needed"""
     if not AI_API_KEY:
         print("⚠️ AI API key not configured")
         return
     
-    prompt = await get_ai_prompt(user_id)
+    # Check if we have a prompt for this user
+    prompt = await get_ai_prompt(user_id, chat_id)
+    
+    # If no prompt exists, create one from chat history
     if not prompt:
-        print("⚠️ No AI prompt found for user")
-        return
+        print(f"📝 No AI prompt found, creating from chat {chat_id} history...")
+        messages = await get_last_messages(user_id, chat_id, 300)
+        
+        if messages and len(messages) >= 10:
+            prompt = await generate_ai_prompt(messages, user_id)
+            await save_ai_prompt(user_id, chat_id, prompt)
+            print(f"✅ Created AI prompt from {len(messages)} messages")
+        else:
+            print(f"⚠️ Not enough messages ({len(messages)}) to create AI prompt, need at least 10")
+            # Use default prompt
+            prompt = "Ты дружелюбный помощник. Отвечай кратко и по делу в неформальном стиле."
     
     try:
         async with aiohttp.ClientSession() as session:
@@ -438,18 +439,22 @@ async def send_ai_response(chat_id: int, message_text: str, user_id: int, bot: B
                 "max_tokens": 500
             }
             
+            print(f"📡 Sending AI request to {AI_API_URL}...")
+            
             async with session.post(AI_API_URL, headers=headers, json=data) as response:
                 if response.status == 200:
                     result = await response.json()
                     ai_message = result['choices'][0]['message']['content']
                     
                     await bot.send_message(chat_id, ai_message)
-                    print(f"🤖 AI response sent to chat {chat_id}")
+                    print(f"🤖 AI response sent to chat {chat_id}: {ai_message[:50]}...")
                 else:
                     error_text = await response.text()
                     print(f"❌ AI API error: {response.status} - {error_text}")
     except Exception as e:
         print(f"❌ Error sending AI response: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 def to_fancy(text: str) -> str:
@@ -680,8 +685,11 @@ async def main() -> None:
             await message.answer(
                 "🤖 <b>AI-режим ВКЛЮЧЁН</b>\n\n"
                 "Теперь бот будет автоматически отвечать на входящие сообщения в вашем стиле!\n\n"
-                "📝 Отправьте команду /generate_prompt чтобы создать AI-профиль на основе последних 300 сообщений из всех ваших чатов.\n\n"
-                "⚠️ После создания промпта ВСЕ сообщения будут удалены из БД.\n\n"
+                "📝 <b>Как это работает:</b>\n"
+                "• Когда вам пишет собеседник, бот анализирует последние 300 сообщений из этого чата\n"
+                "• Создает AI-профиль на основе вашего стиля общения с этим человеком\n"
+                "• Отвечает автоматически в вашем стиле\n\n"
+                "🤖 Просто ждите входящие сообщения - всё работает автоматически!\n\n"
                 "Чтобы выключить: /ai_mode",
                 parse_mode="HTML"
             )
@@ -705,32 +713,15 @@ async def main() -> None:
             await message.answer("⚠️ Сначала включите AI-режим: /ai_mode")
             return
         
-        await message.answer("🔄 Анализирую ваши сообщения из всех чатов...")
-        
-        # Get last 300 messages from ALL business chats
-        messages = await get_last_messages(user_id, None, 300)
-        
-        if not messages:
-            await message.answer("❌ Недостаточно сообщений для анализа. Продолжайте общаться!")
-            return
-        
-        # Generate AI prompt
-        prompt = await generate_ai_prompt(messages, user_id)
-        
-        # Save prompt
-        await save_ai_prompt(user_id, prompt)
-        
-        # Clear ALL messages from DB
-        await clear_messages_for_chat(user_id, None)
-        
         await message.answer(
-            f"✅ <b>AI-профиль создан!</b>\n\n"
-            f"📊 Проанализировано сообщений: <b>{len(messages)}</b>\n"
-            f"🧹 БД полностью очищена\n\n"
-            f"🤖 Теперь бот будет отвечать в вашем стиле на все входящие сообщения!",
+            "ℹ️ <b>AI-профиль создается автоматически!</b>\n\n"
+            "Когда вам пишет собеседник, бот:\n"
+            "1️⃣ Анализирует последние 300 сообщений из этого чата\n"
+            "2️⃣ Создает AI-профиль на основе вашего стиля общения с этим человеком\n"
+            "3️⃣ Отвечает в вашем стиле автоматически\n\n"
+            "🤖 Просто включите AI-режим и ждите входящие сообщения!",
             parse_mode="HTML"
         )
-        print(f"✅ AI prompt generated for user {user_id}, {len(messages)} messages analyzed")
     
     @dp.callback_query(F.data == "show_stats")
     async def callback_show_stats(callback: CallbackQuery):
@@ -764,8 +755,11 @@ async def main() -> None:
             await callback.message.answer(
                 "🤖 <b>AI-режим ВКЛЮЧЁН</b>\n\n"
                 "Теперь бот будет автоматически отвечать на входящие сообщения в вашем стиле!\n\n"
-                "📝 Нажмите кнопку 'Создать AI-профиль' или отправьте /generate_prompt чтобы создать AI-профиль на основе последних 300 сообщений из всех ваших чатов.\n\n"
-                "⚠️ После создания промпта ВСЕ сообщения будут удалены из БД.",
+                "📝 <b>Как это работает:</b>\n"
+                "• Когда вам пишет собеседник, бот анализирует последние 300 сообщений из этого чата\n"
+                "• Создает AI-профиль на основе вашего стиля общения с этим человеком\n"
+                "• Отвечает автоматически в вашем стиле\n\n"
+                "🤖 Просто ждите входящие сообщения - всё работает автоматически!",
                 parse_mode="HTML"
             )
         else:
@@ -789,34 +783,16 @@ async def main() -> None:
             await callback.answer("⚠️ Сначала включите AI-режим!", show_alert=True)
             return
         
-        await callback.message.answer("🔄 Анализирую ваши сообщения из всех чатов...")
-        
-        # Get last 300 messages from ALL business chats
-        messages = await get_last_messages(user_id, None, 300)
-        
-        if not messages:
-            await callback.message.answer("❌ Недостаточно сообщений для анализа. Продолжайте общаться!")
-            await callback.answer()
-            return
-        
-        # Generate AI prompt
-        prompt = await generate_ai_prompt(messages, user_id)
-        
-        # Save prompt
-        await save_ai_prompt(user_id, prompt)
-        
-        # Clear ALL messages from DB
-        await clear_messages_for_chat(user_id, None)
-        
         await callback.message.answer(
-            f"✅ <b>AI-профиль создан!</b>\n\n"
-            f"📊 Проанализировано сообщений: <b>{len(messages)}</b>\n"
-            f"🧹 БД полностью очищена\n\n"
-            f"🤖 Теперь бот будет отвечать в вашем стиле на все входящие сообщения!",
+            "ℹ️ <b>AI-профиль создается автоматически!</b>\n\n"
+            "Когда вам пишет собеседник, бот:\n"
+            "1️⃣ Анализирует последние 300 сообщений из этого чата\n"
+            "2️⃣ Создает AI-профиль на основе вашего стиля общения с этим человеком\n"
+            "3️⃣ Отвечает в вашем стиле автоматически\n\n"
+            "🤖 Просто включите AI-режим и ждите входящие сообщения!",
             parse_mode="HTML"
         )
-        await callback.answer("✅ AI-профиль создан!")
-        print(f"✅ AI prompt generated for user {user_id}, {len(messages)} messages analyzed")
+        await callback.answer("AI-профиль создается автоматически!")
     
     @dp.callback_query(F.data == "show_help")
     async def callback_show_help(callback: CallbackQuery):
