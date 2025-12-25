@@ -7,6 +7,8 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, BusinessMessagesDeleted, FSInputFile
 from aiogram.filters import Command
 import asyncpg
+import aiohttp
+import json
 
 load_dotenv()
 
@@ -22,6 +24,10 @@ DB_PORT = int(os.getenv("DB_PORT", "5432"))
 DB_NAME = os.getenv("DB_NAME", "Secret_message")
 DB_USER = os.getenv("DB_USER", "postgres")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "1")
+
+# AI API settings
+AI_API_KEY = os.getenv("AI_API_KEY", "")
+AI_API_URL = "https://api.openai.com/v1/chat/completions"
 
 # Global database pool
 db_pool = None
@@ -52,7 +58,18 @@ async def init_db():
                 connected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-    print("✅ Business connections table ready")
+        
+        # Create ai_settings table for AI mode configuration
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS ai_settings (
+                user_id BIGINT PRIMARY KEY,
+                ai_mode_enabled BOOLEAN DEFAULT FALSE,
+                system_prompt TEXT,
+                last_prompt_update TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+    print("✅ Business connections and AI settings tables ready")
 
 
 async def close_db():
@@ -260,6 +277,163 @@ async def get_user_by_connection(connection_id: str) -> Optional[int]:
         return user_id
 
 
+async def get_ai_mode_status(user_id: int) -> bool:
+    """Check if AI mode is enabled for user"""
+    async with db_pool.acquire() as conn:
+        result = await conn.fetchval(
+            "SELECT ai_mode_enabled FROM ai_settings WHERE user_id = $1",
+            user_id
+        )
+        return result is True
+
+
+async def toggle_ai_mode(user_id: int) -> bool:
+    """Toggle AI mode for user and return new status"""
+    async with db_pool.acquire() as conn:
+        current = await conn.fetchval(
+            "SELECT ai_mode_enabled FROM ai_settings WHERE user_id = $1",
+            user_id
+        )
+        
+        new_status = not (current is True)
+        
+        await conn.execute(
+            """
+            INSERT INTO ai_settings (user_id, ai_mode_enabled)
+            VALUES ($1, $2)
+            ON CONFLICT (user_id) DO UPDATE
+            SET ai_mode_enabled = $2
+            """,
+            user_id, new_status
+        )
+        
+        return new_status
+
+
+async def get_last_messages(user_id: int, chat_id: int, limit: int = 300) -> list:
+    """Get last N messages for AI prompt generation"""
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT text, caption, user_id, created_at
+            FROM messages
+            WHERE owner_id = $1 AND chat_id = $2
+            ORDER BY created_at DESC
+            LIMIT $3
+            """,
+            user_id, chat_id, limit
+        )
+        return [dict(row) for row in rows]
+
+
+async def save_ai_prompt(user_id: int, prompt: str) -> None:
+    """Save generated AI prompt for user"""
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO ai_settings (user_id, system_prompt, last_prompt_update)
+            VALUES ($1, $2, NOW())
+            ON CONFLICT (user_id) DO UPDATE
+            SET system_prompt = $2, last_prompt_update = NOW()
+            """,
+            user_id, prompt
+        )
+
+
+async def get_ai_prompt(user_id: int) -> Optional[str]:
+    """Get saved AI prompt for user"""
+    async with db_pool.acquire() as conn:
+        result = await conn.fetchval(
+            "SELECT system_prompt FROM ai_settings WHERE user_id = $1",
+            user_id
+        )
+        return result
+
+
+async def clear_messages_for_chat(user_id: int, chat_id: int) -> None:
+    """Clear all messages for specific chat after AI prompt generation"""
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM messages WHERE owner_id = $1 AND chat_id = $2",
+            user_id, chat_id
+        )
+
+
+async def generate_ai_prompt(messages: list, user_id: int) -> str:
+    """Generate AI prompt based on user's message history"""
+    if not messages:
+        return "Ты дружелюбный помощник, который отвечает на сообщения."
+    
+    owner_messages = []
+    other_messages = []
+    
+    for msg in reversed(messages):
+        text = msg.get('text') or msg.get('caption') or ''
+        if text.strip():
+            if msg.get('user_id') == user_id:
+                owner_messages.append(text)
+            else:
+                other_messages.append(text)
+    
+    prompt = f"""Ты должен отвечать на сообщения точно в стиле и манере общения пользователя.
+
+Примеры сообщений пользователя:
+{chr(10).join(f'- {msg}' for msg in owner_messages[:50])}
+
+Анализируй:
+1. Стиль общения (формальный/неформальный)
+2. Использование эмодзи и сленга
+3. Длину сообщений
+4. Тон и настроение
+5. Типичные фразы и выражения
+
+Отвечай ТОЧНО в таком же стиле, как будто это пишет сам пользователь."""
+    
+    return prompt
+
+
+async def send_ai_response(chat_id: int, message_text: str, user_id: int, bot: Bot) -> None:
+    """Send AI-generated response to chat"""
+    if not AI_API_KEY:
+        print("⚠️ AI API key not configured")
+        return
+    
+    prompt = await get_ai_prompt(user_id)
+    if not prompt:
+        print("⚠️ No AI prompt found for user")
+        return
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            headers = {
+                "Authorization": f"Bearer {AI_API_KEY}",
+                "Content-Type": "application/json"
+            }
+            
+            data = {
+                "model": "gpt-3.5-turbo",
+                "messages": [
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": message_text}
+                ],
+                "temperature": 0.9,
+                "max_tokens": 500
+            }
+            
+            async with session.post(AI_API_URL, headers=headers, json=data) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    ai_message = result['choices'][0]['message']['content']
+                    
+                    await bot.send_message(chat_id, ai_message)
+                    print(f"🤖 AI response sent to chat {chat_id}")
+                else:
+                    error_text = await response.text()
+                    print(f"❌ AI API error: {response.status} - {error_text}")
+    except Exception as e:
+        print(f"❌ Error sending AI response: {e}")
+
+
 def to_fancy(text: str) -> str:
     fancy_map = {
         'A': '𝓐', 'B': '𝓑', 'C': '𝓒', 'D': '𝓓', 'E': '𝓔', 'F': '𝓕', 'G': '𝓖', 'H': '𝓗', 'I': '𝓘', 'J': '𝓙',
@@ -457,6 +631,75 @@ async def main() -> None:
         
         await message.answer(text, parse_mode="HTML")
     
+    @dp.message(Command("ai_mode"))
+    async def cmd_ai_mode(message: Message):
+        user_id = message.from_user.id
+        
+        if not await is_user_authenticated(user_id):
+            await message.answer("🔐 Сначала авторизуйтесь: /start")
+            return
+        
+        new_status = await toggle_ai_mode(user_id)
+        
+        if new_status:
+            await message.answer(
+                "🤖 <b>AI-режим ВКЛЮЧЁН</b>\n\n"
+                "Теперь бот будет автоматически отвечать на входящие сообщения в вашем стиле!\n\n"
+                "📝 Отправьте команду /generate_prompt в любом чате, чтобы создать AI-профиль на основе последних 300 сообщений.\n\n"
+                "⚠️ После создания промпта все сообщения из этого чата будут удалены из БД.\n\n"
+                "Чтобы выключить: /ai_mode",
+                parse_mode="HTML"
+            )
+        else:
+            await message.answer(
+                "🔴 <b>AI-режим ВЫКЛЮЧЁН</b>\n\n"
+                "Бот вернулся в обычный режим - только уведомления об удалённых сообщениях.\n\n"
+                "Чтобы включить: /ai_mode",
+                parse_mode="HTML"
+            )
+    
+    @dp.message(Command("generate_prompt"))
+    async def cmd_generate_prompt(message: Message):
+        user_id = message.from_user.id
+        
+        if not await is_user_authenticated(user_id):
+            await message.answer("🔐 Сначала авторизуйтесь: /start")
+            return
+        
+        if not await get_ai_mode_status(user_id):
+            await message.answer("⚠️ Сначала включите AI-режим: /ai_mode")
+            return
+        
+        await message.answer("🔄 Анализирую ваши сообщения...")
+        
+        # Get chat_id from reply or use current chat
+        chat_id = message.chat.id
+        
+        # Get last 300 messages
+        messages = await get_last_messages(user_id, chat_id, 300)
+        
+        if not messages:
+            await message.answer("❌ Недостаточно сообщений для анализа. Продолжайте общаться!")
+            return
+        
+        # Generate AI prompt
+        prompt = await generate_ai_prompt(messages, user_id)
+        
+        # Save prompt
+        await save_ai_prompt(user_id, prompt)
+        
+        # Clear messages from DB
+        await clear_messages_for_chat(user_id, chat_id)
+        
+        await message.answer(
+            f"✅ <b>AI-профиль создан!</b>\n\n"
+            f"📊 Проанализировано сообщений: <b>{len(messages)}</b>\n"
+            f"🧹 БД очищена для этого чата\n\n"
+            f"🤖 Теперь бот будет отвечать в вашем стиле!",
+            parse_mode="HTML"
+        )
+        print(f"✅ AI prompt generated for user {user_id}, {len(messages)} messages analyzed")
+    
     @dp.business_connection()
     async def handle_business_connection(connection):
         """Handle business connection events"""
@@ -593,6 +836,14 @@ async def main() -> None:
                     message.text or "", media_type=media_type, file_path=file_path,
                     caption=message.caption, links=", ".join(links) if links else None)
         await increment_stat(owner_id, "total_messages")
+        
+        # AI auto-response if enabled and message is not from owner
+        if message.from_user and message.from_user.id != owner_id:
+            if await get_ai_mode_status(owner_id):
+                message_text = message.text or message.caption or ""
+                if message_text.strip():
+                    await send_ai_response(message.chat.id, message_text, owner_id, bot)
+                    print(f"🤖 AI auto-response triggered for chat {message.chat.id}")
     
     @dp.edited_business_message()
     async def handle_edited_business_message(message: Message):
