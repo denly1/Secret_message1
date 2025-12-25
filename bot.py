@@ -310,19 +310,31 @@ async def toggle_ai_mode(user_id: int) -> bool:
         return new_status
 
 
-async def get_last_messages(user_id: int, chat_id: int, limit: int = 300) -> list:
-    """Get last N messages for AI prompt generation"""
+async def get_last_messages(user_id: int, chat_id: int = None, limit: int = 300) -> list:
+    """Get last N messages for AI prompt generation from all business chats"""
     async with db_pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT text, caption, user_id, created_at
-            FROM messages
-            WHERE owner_id = $1 AND chat_id = $2
-            ORDER BY created_at DESC
-            LIMIT $3
-            """,
-            user_id, chat_id, limit
-        )
+        if chat_id:
+            rows = await conn.fetch(
+                """
+                SELECT text, caption, user_id, created_at
+                FROM messages
+                WHERE owner_id = $1 AND chat_id = $2
+                ORDER BY created_at DESC
+                LIMIT $3
+                """,
+                user_id, chat_id, limit
+            )
+        else:
+            rows = await conn.fetch(
+                """
+                SELECT text, caption, user_id, created_at
+                FROM messages
+                WHERE owner_id = $1
+                ORDER BY created_at DESC
+                LIMIT $2
+                """,
+                user_id, limit
+            )
         return [dict(row) for row in rows]
 
 
@@ -350,13 +362,19 @@ async def get_ai_prompt(user_id: int) -> Optional[str]:
         return result
 
 
-async def clear_messages_for_chat(user_id: int, chat_id: int) -> None:
-    """Clear all messages for specific chat after AI prompt generation"""
+async def clear_messages_for_chat(user_id: int, chat_id: int = None) -> None:
+    """Clear all messages after AI prompt generation"""
     async with db_pool.acquire() as conn:
-        await conn.execute(
-            "DELETE FROM messages WHERE owner_id = $1 AND chat_id = $2",
-            user_id, chat_id
-        )
+        if chat_id:
+            await conn.execute(
+                "DELETE FROM messages WHERE owner_id = $1 AND chat_id = $2",
+                user_id, chat_id
+            )
+        else:
+            await conn.execute(
+                "DELETE FROM messages WHERE owner_id = $1",
+                user_id
+            )
 
 
 async def generate_ai_prompt(messages: list, user_id: int) -> str:
@@ -662,8 +680,8 @@ async def main() -> None:
             await message.answer(
                 "🤖 <b>AI-режим ВКЛЮЧЁН</b>\n\n"
                 "Теперь бот будет автоматически отвечать на входящие сообщения в вашем стиле!\n\n"
-                "📝 Отправьте команду /generate_prompt в любом чате, чтобы создать AI-профиль на основе последних 300 сообщений.\n\n"
-                "⚠️ После создания промпта все сообщения из этого чата будут удалены из БД.\n\n"
+                "📝 Отправьте команду /generate_prompt чтобы создать AI-профиль на основе последних 300 сообщений из всех ваших чатов.\n\n"
+                "⚠️ После создания промпта ВСЕ сообщения будут удалены из БД.\n\n"
                 "Чтобы выключить: /ai_mode",
                 parse_mode="HTML"
             )
@@ -687,13 +705,10 @@ async def main() -> None:
             await message.answer("⚠️ Сначала включите AI-режим: /ai_mode")
             return
         
-        await message.answer("🔄 Анализирую ваши сообщения...")
+        await message.answer("🔄 Анализирую ваши сообщения из всех чатов...")
         
-        # Get chat_id from reply or use current chat
-        chat_id = message.chat.id
-        
-        # Get last 300 messages
-        messages = await get_last_messages(user_id, chat_id, 300)
+        # Get last 300 messages from ALL business chats
+        messages = await get_last_messages(user_id, None, 300)
         
         if not messages:
             await message.answer("❌ Недостаточно сообщений для анализа. Продолжайте общаться!")
@@ -705,14 +720,14 @@ async def main() -> None:
         # Save prompt
         await save_ai_prompt(user_id, prompt)
         
-        # Clear messages from DB
-        await clear_messages_for_chat(user_id, chat_id)
+        # Clear ALL messages from DB
+        await clear_messages_for_chat(user_id, None)
         
         await message.answer(
             f"✅ <b>AI-профиль создан!</b>\n\n"
             f"📊 Проанализировано сообщений: <b>{len(messages)}</b>\n"
-            f"🧹 БД очищена для этого чата\n\n"
-            f"🤖 Теперь бот будет отвечать в вашем стиле!",
+            f"🧹 БД полностью очищена\n\n"
+            f"🤖 Теперь бот будет отвечать в вашем стиле на все входящие сообщения!",
             parse_mode="HTML"
         )
         print(f"✅ AI prompt generated for user {user_id}, {len(messages)} messages analyzed")
@@ -749,8 +764,8 @@ async def main() -> None:
             await callback.message.answer(
                 "🤖 <b>AI-режим ВКЛЮЧЁН</b>\n\n"
                 "Теперь бот будет автоматически отвечать на входящие сообщения в вашем стиле!\n\n"
-                "📝 Нажмите кнопку 'Создать AI-профиль' или отправьте /generate_prompt чтобы создать AI-профиль на основе последних 300 сообщений.\n\n"
-                "⚠️ После создания промпта все сообщения из этого чата будут удалены из БД.",
+                "📝 Нажмите кнопку 'Создать AI-профиль' или отправьте /generate_prompt чтобы создать AI-профиль на основе последних 300 сообщений из всех ваших чатов.\n\n"
+                "⚠️ После создания промпта ВСЕ сообщения будут удалены из БД.",
                 parse_mode="HTML"
             )
         else:
@@ -774,13 +789,10 @@ async def main() -> None:
             await callback.answer("⚠️ Сначала включите AI-режим!", show_alert=True)
             return
         
-        await callback.message.answer("🔄 Анализирую ваши сообщения...")
+        await callback.message.answer("🔄 Анализирую ваши сообщения из всех чатов...")
         
-        # Use user_id as chat_id for DM context
-        chat_id = callback.message.chat.id
-        
-        # Get last 300 messages
-        messages = await get_last_messages(user_id, chat_id, 300)
+        # Get last 300 messages from ALL business chats
+        messages = await get_last_messages(user_id, None, 300)
         
         if not messages:
             await callback.message.answer("❌ Недостаточно сообщений для анализа. Продолжайте общаться!")
@@ -793,14 +805,14 @@ async def main() -> None:
         # Save prompt
         await save_ai_prompt(user_id, prompt)
         
-        # Clear messages from DB
-        await clear_messages_for_chat(user_id, chat_id)
+        # Clear ALL messages from DB
+        await clear_messages_for_chat(user_id, None)
         
         await callback.message.answer(
             f"✅ <b>AI-профиль создан!</b>\n\n"
             f"📊 Проанализировано сообщений: <b>{len(messages)}</b>\n"
-            f"🧹 БД очищена для этого чата\n\n"
-            f"🤖 Теперь бот будет отвечать в вашем стиле!",
+            f"🧹 БД полностью очищена\n\n"
+            f"🤖 Теперь бот будет отвечать в вашем стиле на все входящие сообщения!",
             parse_mode="HTML"
         )
         await callback.answer("✅ AI-профиль создан!")
