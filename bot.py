@@ -27,7 +27,7 @@ DB_PASSWORD = os.getenv("DB_PASSWORD", "1")
 
 # AI API settings
 AI_API_KEY = os.getenv("AI_API_KEY", "")
-AI_API_URL = "https://api.openai.com/v1/chat/completions"
+AI_API_URL = os.getenv("AI_API_URL", "https://api.openai.com/v1/chat/completions")
 
 # Global database pool
 db_pool = None
