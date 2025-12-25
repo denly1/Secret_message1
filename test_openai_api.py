@@ -5,8 +5,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-AI_API_KEY = os.getenv("AI_API_KEY", "")
-AI_API_URL = "https://api.openai.com/v1/chat/completions"
+AI_API_KEY = "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"
+AI_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 async def test_openai_api():
     """Test if OpenAI API key is valid"""
