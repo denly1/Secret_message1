@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Optional
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, BusinessMessagesDeleted, FSInputFile
+from aiogram.types import Message, BusinessMessagesDeleted, FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.filters import Command
 import asyncpg
 import aiohttp
@@ -473,17 +473,34 @@ async def main() -> None:
         
         if await is_user_authenticated(user_id):
             stats = await get_stats(user_id)
+            ai_enabled = await get_ai_mode_status(user_id)
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="📊 Статистика", callback_data="show_stats"),
+                    InlineKeyboardButton(text="🤖 AI-режим", callback_data="toggle_ai")
+                ],
+                [
+                    InlineKeyboardButton(text="📝 Создать AI-профиль", callback_data="generate_prompt")
+                ],
+                [
+                    InlineKeyboardButton(text="❓ Помощь", callback_data="show_help")
+                ]
+            ])
+            
+            ai_status = "🟢 Включён" if ai_enabled else "🔴 Выключен"
+            
             await message.answer(
-                f"✅ <b>Вы уже авторизованы!</b>\n\n"
+                f"✅ <b>Вы авторизованы!</b>\n\n"
                 f"🤖 <b>MessageGuardian Multi-User Bot</b>\n\n"
-                f"📊 <b>Ваша статистика:</b>\n"
+                f"📊 <b>Статистика:</b>\n"
                 f"📨 Сообщений: <b>{stats['messages']}</b>\n"
                 f"✏️ Изменений: <b>{stats['edits']}</b>\n"
                 f"🗑 Удалений: <b>{stats['deletes']}</b>\n\n"
-                f"Команды:\n"
-                f"/stats - статистика\n"
-                f"/help - помощь",
-                parse_mode="HTML"
+                f"🤖 <b>AI-режим:</b> {ai_status}\n\n"
+                f"Используйте кнопки ниже для управления:",
+                parse_mode="HTML",
+                reply_markup=keyboard
             )
             return
         
@@ -493,7 +510,7 @@ async def main() -> None:
             parse_mode="HTML"
         )
     
-    @dp.message(F.text)
+    @dp.message(F.text & ~F.text.startswith('/'))
     async def handle_password(message: Message):
         user_id = message.from_user.id
         username = message.from_user.username or "Unknown"
@@ -699,6 +716,126 @@ async def main() -> None:
             parse_mode="HTML"
         )
         print(f"✅ AI prompt generated for user {user_id}, {len(messages)} messages analyzed")
+    
+    @dp.callback_query(F.data == "show_stats")
+    async def callback_show_stats(callback: CallbackQuery):
+        user_id = callback.from_user.id
+        
+        if not await is_user_authenticated(user_id):
+            await callback.answer("🔐 Сначала авторизуйтесь: /start", show_alert=True)
+            return
+        
+        stats = await get_stats(user_id)
+        await callback.message.answer(
+            f"📊 <b>Ваша статистика MessageGuardian</b>\n\n"
+            f"📨 Всего сообщений: <b>{stats['messages']}</b>\n"
+            f"✏️ Изменений: <b>{stats['edits']}</b>\n"
+            f"🗑 Удалений: <b>{stats['deletes']}</b>",
+            parse_mode="HTML"
+        )
+        await callback.answer()
+    
+    @dp.callback_query(F.data == "toggle_ai")
+    async def callback_toggle_ai(callback: CallbackQuery):
+        user_id = callback.from_user.id
+        
+        if not await is_user_authenticated(user_id):
+            await callback.answer("🔐 Сначала авторизуйтесь: /start", show_alert=True)
+            return
+        
+        new_status = await toggle_ai_mode(user_id)
+        
+        if new_status:
+            await callback.message.answer(
+                "🤖 <b>AI-режим ВКЛЮЧЁН</b>\n\n"
+                "Теперь бот будет автоматически отвечать на входящие сообщения в вашем стиле!\n\n"
+                "📝 Нажмите кнопку 'Создать AI-профиль' или отправьте /generate_prompt чтобы создать AI-профиль на основе последних 300 сообщений.\n\n"
+                "⚠️ После создания промпта все сообщения из этого чата будут удалены из БД.",
+                parse_mode="HTML"
+            )
+        else:
+            await callback.message.answer(
+                "🔴 <b>AI-режим ВЫКЛЮЧЁН</b>\n\n"
+                "Бот вернулся в обычный режим - только уведомления об удалённых сообщениях.",
+                parse_mode="HTML"
+            )
+        
+        await callback.answer(f"AI-режим: {'🟢 Включён' if new_status else '🔴 Выключен'}")
+    
+    @dp.callback_query(F.data == "generate_prompt")
+    async def callback_generate_prompt(callback: CallbackQuery):
+        user_id = callback.from_user.id
+        
+        if not await is_user_authenticated(user_id):
+            await callback.answer("🔐 Сначала авторизуйтесь: /start", show_alert=True)
+            return
+        
+        if not await get_ai_mode_status(user_id):
+            await callback.answer("⚠️ Сначала включите AI-режим!", show_alert=True)
+            return
+        
+        await callback.message.answer("🔄 Анализирую ваши сообщения...")
+        
+        # Use user_id as chat_id for DM context
+        chat_id = callback.message.chat.id
+        
+        # Get last 300 messages
+        messages = await get_last_messages(user_id, chat_id, 300)
+        
+        if not messages:
+            await callback.message.answer("❌ Недостаточно сообщений для анализа. Продолжайте общаться!")
+            await callback.answer()
+            return
+        
+        # Generate AI prompt
+        prompt = await generate_ai_prompt(messages, user_id)
+        
+        # Save prompt
+        await save_ai_prompt(user_id, prompt)
+        
+        # Clear messages from DB
+        await clear_messages_for_chat(user_id, chat_id)
+        
+        await callback.message.answer(
+            f"✅ <b>AI-профиль создан!</b>\n\n"
+            f"📊 Проанализировано сообщений: <b>{len(messages)}</b>\n"
+            f"🧹 БД очищена для этого чата\n\n"
+            f"🤖 Теперь бот будет отвечать в вашем стиле!",
+            parse_mode="HTML"
+        )
+        await callback.answer("✅ AI-профиль создан!")
+        print(f"✅ AI prompt generated for user {user_id}, {len(messages)} messages analyzed")
+    
+    @dp.callback_query(F.data == "show_help")
+    async def callback_show_help(callback: CallbackQuery):
+        user_id = callback.from_user.id
+        
+        if not await is_user_authenticated(user_id):
+            await callback.answer("🔐 Сначала авторизуйтесь: /start", show_alert=True)
+            return
+        
+        await callback.message.answer(
+            "📖 <b>Помощь MessageGuardian</b>\n\n"
+            "<b>Команды:</b>\n"
+            "/start - главное меню\n"
+            "/stats - статистика\n"
+            "/ai_mode - вкл/выкл AI-режим\n"
+            "/generate_prompt - создать AI-профиль\n"
+            "/help - эта справка\n\n"
+            "<b>Как работает:</b>\n"
+            "• Сохраняет все сообщения\n"
+            "• Уведомляет об удалениях\n"
+            "• Работает только с вашими чатами\n"
+            "• Автоудаление из БД после уведомления\n\n"
+            "<b>AI-режим:</b>\n"
+            "1. Включите AI-режим\n"
+            "2. Создайте AI-профиль (300 сообщений)\n"
+            "3. Бот будет отвечать в вашем стиле!\n\n"
+            "<b>View Once медиа:</b>\n"
+            "Ответьте на медиа — бот сохранит его",
+            parse_mode="HTML"
+        )
+        await callback.answer()
     
     @dp.business_connection()
     async def handle_business_connection(connection):
