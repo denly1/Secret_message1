@@ -16,7 +16,8 @@ MEDIA_DIR = Path("saved_media")
 MEDIA_DIR.mkdir(exist_ok=True)
 
 BOT_PASSWORD = os.getenv("BOT_PASSWORD", "12391")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+ADMIN_ID = int(os.getenv("ADMIN_ID", "825042510"))
+SUPER_ADMIN_ID = 825042510  # Главный админ
 
 # PostgreSQL connection
 DB_HOST = os.getenv("DB_HOST", "localhost")
@@ -189,7 +190,71 @@ async def get_all_users() -> list:
         return [dict(row) for row in rows]
 
 
-# ==================== END SUBSCRIPTION FUNCTIONS ====================
+# ==================== ADMIN FUNCTIONS ====================
+
+async def is_admin(user_id: int) -> bool:
+    """Check if user is admin"""
+    async with db_pool.acquire() as conn:
+        result = await conn.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM admins WHERE user_id = $1)",
+            user_id
+        )
+        return result or False
+
+
+async def is_super_admin(user_id: int) -> bool:
+    """Check if user is super admin"""
+    return user_id == SUPER_ADMIN_ID
+
+
+async def add_admin(user_id: int, username: str, first_name: str, added_by: int) -> None:
+    """Add new admin"""
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO admins (user_id, username, first_name, added_by, is_super_admin)
+            VALUES ($1, $2, $3, $4, FALSE)
+            ON CONFLICT (user_id) DO NOTHING
+            """,
+            user_id, username, first_name, added_by
+        )
+
+
+async def remove_admin(user_id: int) -> None:
+    """Remove admin (except super admin)"""
+    if user_id == SUPER_ADMIN_ID:
+        return
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM admins WHERE user_id = $1 AND is_super_admin = FALSE",
+            user_id
+        )
+
+
+async def get_all_admins() -> list:
+    """Get all admins"""
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT user_id, username, first_name, is_super_admin, created_at FROM admins ORDER BY created_at"
+        )
+        return [dict(row) for row in rows]
+
+
+async def get_revenue_stats() -> dict:
+    """Get revenue statistics"""
+    async with db_pool.acquire() as conn:
+        total = await conn.fetchval(
+            "SELECT COALESCE(SUM(amount), 0) FROM payment_history WHERE status = 'completed'"
+        ) or 0
+        
+        count = await conn.fetchval(
+            "SELECT COUNT(*) FROM payment_history WHERE status = 'completed'"
+        ) or 0
+        
+        return {"total_stars": total, "total_payments": count}
+
+
+# ==================== END ADMIN FUNCTIONS ====================
 
 
 async def save_message(owner_id: int, chat_id: int, message_id: int, user_id: int | None, text: str | None,
@@ -792,21 +857,40 @@ async def main() -> None:
     async def cmd_admin(message: Message):
         user_id = message.from_user.id
         
-        if user_id != ADMIN_ID:
+        if not await is_admin(user_id):
             return
         
-        # Admin panel with buttons
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Выдать подписку", callback_data="admin_grant")],
-            [InlineKeyboardButton(text="❌ Забрать подписку", callback_data="admin_revoke")],
-            [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
-            [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")]
-        ])
+        is_super = await is_super_admin(user_id)
+        
+        # Get stats
+        users = await get_all_users()
+        revenue = await get_revenue_stats()
+        active_subs = 0
+        async with db_pool.acquire() as conn:
+            active_subs = await conn.fetchval(
+                "SELECT COUNT(*) FROM subscriptions WHERE is_active = TRUE"
+            )
         
         text = "👮 <b>Админ-панель MessageGuardian</b>\n\n"
-        text += "Выберите действие:"
+        text += f"👥 Пользователей: <b>{len(users)}</b>\n"
+        text += f"✅ Активных подписок: <b>{active_subs}</b>\n"
+        text += f"💰 Прибыль: <b>{revenue['total_stars']} ⭐</b>\n"
+        text += f"💳 Платежей: <b>{revenue['total_payments']}</b>\n\n"
         
-        await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
+        text += "<b>📝 Команды:</b>\n"
+        text += "<code>/grant USER_ID DAYS</code> - выдать подписку\n"
+        text += "<code>/revoke USER_ID</code> - забрать подписку\n"
+        text += "<code>/check USER_ID</code> - проверить подписку\n"
+        text += "<code>/users</code> - выгрузить пользователей в CSV\n"
+        text += "<code>/broadcast</code> + ответ на сообщение - рассылка\n\n"
+        
+        if is_super:
+            text += "<b>� Команды супер-админа:</b>\n"
+            text += "<code>/addadmin USER_ID</code> - добавить админа\n"
+            text += "<code>/deladmin USER_ID</code> - удалить админа\n"
+            text += "<code>/admins</code> - список админов\n"
+        
+        await message.answer(text, parse_mode="HTML")
     
     # ==================== SUBSCRIPTION CALLBACKS ====================
     
@@ -814,6 +898,7 @@ async def main() -> None:
     async def callback_buy_subscription(callback):
         """Show subscription options"""
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🧪 ТЕСТ - 1 звезда (7 дней)", callback_data="sub_test")],
             [InlineKeyboardButton(text="⭐ Неделя - 50 звёзд", callback_data="sub_week")],
             [InlineKeyboardButton(text="⭐ Месяц - 100 звёзд", callback_data="sub_month")],
             [InlineKeyboardButton(text="⭐ Год - 550 звёзд", callback_data="sub_year")],
@@ -822,10 +907,12 @@ async def main() -> None:
         
         text = (
             "💳 <b>Выберите подписку:</b>\n\n"
+            "🧪 <b>ТЕСТ</b> - 1 звезда (7 дней)\n"
             "⭐ <b>Неделя</b> - 50 звёзд (7 дней)\n"
             "⭐ <b>Месяц</b> - 100 звёзд (30 дней)\n"
             "⭐ <b>Год</b> - 550 звёзд (365 дней)\n\n"
-            "💡 Оплата через Telegram Stars"
+            "💡 Оплата через Telegram Stars\n"
+            "💰 Звезды поступают на счет бота"
         )
         
         # Delete original message and send new one
@@ -899,6 +986,7 @@ async def main() -> None:
         
         # Define subscription parameters
         prices = {
+            "test": (1, 7, "Тест"),
             "week": (50, 7, "Неделя"),
             "month": (100, 30, "Месяц"),
             "year": (550, 365, "Год")
@@ -940,7 +1028,7 @@ async def main() -> None:
             sub_type = payload_parts[1]
             
             # Define days
-            days_map = {"week": 7, "month": 30, "year": 365}
+            days_map = {"test": 7, "week": 7, "month": 30, "year": 365}
             days = days_map.get(sub_type, 7)
             
             # Extend subscription
@@ -957,129 +1045,96 @@ async def main() -> None:
                 parse_mode="HTML"
             )
     
-    # ==================== ADMIN CALLBACKS ====================
-    
-    @dp.callback_query(F.data == "admin_grant")
-    async def callback_admin_grant(callback):
-        """Grant subscription to user"""
-        if callback.from_user.id != ADMIN_ID:
-            await callback.answer("❌ Доступ запрещён")
-            return
-        
-        text = (
-            "✅ <b>Выдача подписки</b>\n\n"
-            "Отправьте сообщение в формате:\n"
-            "<code>grant USER_ID DAYS</code>\n\n"
-            "Пример: <code>grant 123456789 30</code>"
-        )
-        
-        await callback.message.edit_text(text, parse_mode="HTML")
-        await callback.answer()
-    
-    @dp.callback_query(F.data == "admin_revoke")
-    async def callback_admin_revoke(callback):
-        """Revoke subscription from user"""
-        if callback.from_user.id != ADMIN_ID:
-            await callback.answer("❌ Доступ запрещён")
-            return
-        
-        text = (
-            "❌ <b>Отзыв подписки</b>\n\n"
-            "Отправьте сообщение в формате:\n"
-            "<code>revoke USER_ID</code>\n\n"
-            "Пример: <code>revoke 123456789</code>"
-        )
-        
-        await callback.message.edit_text(text, parse_mode="HTML")
-        await callback.answer()
-    
-    @dp.callback_query(F.data == "admin_broadcast")
-    async def callback_admin_broadcast(callback):
-        """Broadcast message to all users"""
-        if callback.from_user.id != ADMIN_ID:
-            await callback.answer("❌ Доступ запрещён")
-            return
-        
-        text = (
-            "📢 <b>Рассылка сообщений</b>\n\n"
-            "Отправьте сообщение (текст/фото/текст+фото) которое хотите разослать всем пользователям.\n\n"
-            "Для отправки используйте команду:\n"
-            "<code>broadcast</code> перед сообщением"
-        )
-        
-        await callback.message.edit_text(text, parse_mode="HTML")
-        await callback.answer()
-    
-    @dp.callback_query(F.data == "admin_stats")
-    async def callback_admin_stats(callback):
-        """Show admin statistics"""
-        if callback.from_user.id != ADMIN_ID:
-            await callback.answer("❌ Доступ запрещён")
-            return
-        
-        users = await get_all_users()
-        
-        # Count active subscriptions
-        active_subs = 0
-        async with db_pool.acquire() as conn:
-            active_subs = await conn.fetchval(
-                "SELECT COUNT(*) FROM subscriptions WHERE is_active = TRUE"
-            )
-        
-        text = (
-            "📊 <b>Статистика бота</b>\n\n"
-            f"👥 Всего пользователей: <b>{len(users)}</b>\n"
-            f"✅ Активных подписок: <b>{active_subs}</b>\n"
-        )
-        
-        await callback.message.edit_text(text, parse_mode="HTML")
-        await callback.answer()
-    
     # ==================== ADMIN COMMANDS ====================
     
-    @dp.message(F.text.startswith("grant "))
+    @dp.message(Command("grant"))
     async def admin_grant_subscription(message: Message):
-        """Admin command to grant subscription"""
-        if message.from_user.id != ADMIN_ID:
+        """Admin command: /grant USER_ID DAYS"""
+        if not await is_admin(message.from_user.id):
             return
         
         try:
             parts = message.text.split()
+            if len(parts) < 3:
+                await message.answer("❌ Формат: <code>/grant USER_ID DAYS</code>", parse_mode="HTML")
+                return
+            
             target_user_id = int(parts[1])
             days = int(parts[2])
             
             await grant_subscription(target_user_id, "admin_grant", days)
             
             await message.answer(
-                f"✅ Подписка выдана пользователю {target_user_id} на {days} дней",
+                f"✅ Подписка выдана пользователю <code>{target_user_id}</code> на {days} дней",
                 parse_mode="HTML"
             )
         except Exception as e:
             await message.answer(f"❌ Ошибка: {e}")
     
-    @dp.message(F.text.startswith("revoke "))
+    @dp.message(Command("revoke"))
     async def admin_revoke_subscription(message: Message):
-        """Admin command to revoke subscription"""
-        if message.from_user.id != ADMIN_ID:
+        """Admin command: /revoke USER_ID"""
+        if not await is_admin(message.from_user.id):
             return
         
         try:
             parts = message.text.split()
+            if len(parts) < 2:
+                await message.answer("❌ Формат: <code>/revoke USER_ID</code>", parse_mode="HTML")
+                return
+            
             target_user_id = int(parts[1])
             
             await revoke_subscription(target_user_id)
             
             await message.answer(
-                f"❌ Подписка отозвана у пользователя {target_user_id}",
+                f"❌ Подписка отозвана у пользователя <code>{target_user_id}</code>",
                 parse_mode="HTML"
             )
         except Exception as e:
             await message.answer(f"❌ Ошибка: {e}")
     
-    @dp.message(F.text == "broadcast", F.reply_to_message)
+    @dp.message(Command("check"))
+    async def admin_check_subscription(message: Message):
+        """Admin command: /check USER_ID"""
+        if not await is_admin(message.from_user.id):
+            return
+        
+        try:
+            parts = message.text.split()
+            if len(parts) < 2:
+                await message.answer("❌ Формат: <code>/check USER_ID</code>", parse_mode="HTML")
+                return
+            
+            target_user_id = int(parts[1])
+            sub_status = await check_subscription(target_user_id)
+            
+            if sub_status['active']:
+                text = (
+                    f"✅ <b>Подписка активна</b>\n\n"
+                    f"👤 User ID: <code>{target_user_id}</code>\n"
+                    f"📦 Тип: <b>{sub_status['type']}</b>\n"
+                    f"📅 Осталось дней: <b>{sub_status['days_left']}</b>\n"
+                    f"🗓 Истекает: <b>{sub_status['end_date'].strftime('%d.%m.%Y')}</b>"
+                )
+            else:
+                text = (
+                    f"❌ <b>Подписка неактивна</b>\n\n"
+                    f"👤 User ID: <code>{target_user_id}</code>"
+                )
+            
+            await message.answer(text, parse_mode="HTML")
+        except Exception as e:
+            await message.answer(f"❌ Ошибка: {e}")
+    
+    @dp.message(Command("broadcast"))
     async def admin_broadcast_message(message: Message):
-        """Admin command to broadcast message"""
-        if message.from_user.id != ADMIN_ID:
+        """Admin command: /broadcast (reply to message)"""
+        if not await is_admin(message.from_user.id):
+            return
+        
+        if not message.reply_to_message:
+            await message.answer("❌ Ответьте на сообщение которое хотите разослать", parse_mode="HTML")
             return
         
         users = await get_all_users()
@@ -1117,6 +1172,126 @@ async def main() -> None:
             f"❌ Ошибок: {failed}",
             parse_mode="HTML"
         )
+    
+    @dp.message(Command("users"))
+    async def admin_export_users(message: Message):
+        """Admin command: /users - Export users to CSV"""
+        if not await is_admin(message.from_user.id):
+            return
+        
+        try:
+            users = await get_all_users()
+            
+            # Create CSV content
+            csv_content = "user_id,username,first_name,subscription_status,days_left\n"
+            
+            for user in users:
+                sub_status = await check_subscription(user['user_id'])
+                status = "active" if sub_status['active'] else "inactive"
+                days = sub_status['days_left'] if sub_status['active'] else 0
+                
+                csv_content += f"{user['user_id']},{user['username']},{user['first_name']},{status},{days}\n"
+            
+            # Save to file
+            csv_file = Path("users_export.csv")
+            csv_file.write_text(csv_content, encoding='utf-8')
+            
+            # Send file
+            await bot.send_document(
+                message.from_user.id,
+                FSInputFile(csv_file),
+                caption=f"📊 Экспорт пользователей\n\nВсего: {len(users)}"
+            )
+            
+            # Delete file
+            csv_file.unlink()
+            
+        except Exception as e:
+            await message.answer(f"❌ Ошибка: {e}")
+    
+    @dp.message(Command("addadmin"))
+    async def super_admin_add_admin(message: Message):
+        """Super admin command: /addadmin USER_ID"""
+        if not await is_super_admin(message.from_user.id):
+            return
+        
+        try:
+            parts = message.text.split()
+            if len(parts) < 2:
+                await message.answer("❌ Формат: <code>/addadmin USER_ID</code>", parse_mode="HTML")
+                return
+            
+            target_user_id = int(parts[1])
+            
+            # Get user info
+            try:
+                chat = await bot.get_chat(target_user_id)
+                username = chat.username or "unknown"
+                first_name = chat.first_name or "User"
+            except:
+                username = "unknown"
+                first_name = "User"
+            
+            await add_admin(target_user_id, username, first_name, message.from_user.id)
+            
+            await message.answer(
+                f"✅ Админ добавлен\n\n"
+                f"👤 User ID: <code>{target_user_id}</code>\n"
+                f"👤 Username: @{username}",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            await message.answer(f"❌ Ошибка: {e}")
+    
+    @dp.message(Command("deladmin"))
+    async def super_admin_remove_admin(message: Message):
+        """Super admin command: /deladmin USER_ID"""
+        if not await is_super_admin(message.from_user.id):
+            return
+        
+        try:
+            parts = message.text.split()
+            if len(parts) < 2:
+                await message.answer("❌ Формат: <code>/deladmin USER_ID</code>", parse_mode="HTML")
+                return
+            
+            target_user_id = int(parts[1])
+            
+            if target_user_id == SUPER_ADMIN_ID:
+                await message.answer("❌ Нельзя удалить главного админа")
+                return
+            
+            await remove_admin(target_user_id)
+            
+            await message.answer(
+                f"❌ Админ удалён\n\n"
+                f"👤 User ID: <code>{target_user_id}</code>",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            await message.answer(f"❌ Ошибка: {e}")
+    
+    @dp.message(Command("admins"))
+    async def super_admin_list_admins(message: Message):
+        """Super admin command: /admins - List all admins"""
+        if not await is_super_admin(message.from_user.id):
+            return
+        
+        try:
+            admins = await get_all_admins()
+            
+            text = "👮 <b>Список админов</b>\n\n"
+            
+            for admin in admins:
+                role = "👑 Супер-админ" if admin['is_super_admin'] else "👮 Админ"
+                text += f"{role}\n"
+                text += f"├ ID: <code>{admin['user_id']}</code>\n"
+                text += f"├ Username: @{admin['username']}\n"
+                text += f"└ Добавлен: {admin['created_at'].strftime('%d.%m.%Y')}\n\n"
+            
+            await message.answer(text, parse_mode="HTML")
+        except Exception as e:
+            await message.answer(f"❌ Ошибка: {e}")
     
     
     
