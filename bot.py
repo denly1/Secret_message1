@@ -828,8 +828,68 @@ async def main() -> None:
             "💡 Оплата через Telegram Stars"
         )
         
-        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+        # Delete original message and send new one
+        try:
+            await callback.message.delete()
+        except:
+            pass
+        
+        await bot.send_message(callback.from_user.id, text, parse_mode="HTML", reply_markup=keyboard)
         await callback.answer()
+    
+    @dp.callback_query(F.data == "back_to_start")
+    async def callback_back_to_start(callback):
+        """Return to start menu"""
+        try:
+            await callback.message.delete()
+        except:
+            pass
+        await callback.answer("Возвращаемся в главное меню...")
+        
+        # Get subscription and stats
+        user_id = callback.from_user.id
+        sub_status = await check_subscription(user_id)
+        stats = await get_stats(user_id)
+        
+        # Build keyboard
+        keyboard_buttons = [
+            [InlineKeyboardButton(text="📚 Инструкция по подключению", url="https://t.me/MessageAssistant/4")]
+        ]
+        if not sub_status['active']:
+            keyboard_buttons.append([InlineKeyboardButton(text="💳 Купить подписку", callback_data="buy_subscription")])
+        keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
+        
+        # Build text
+        if sub_status['active']:
+            sub_info = f"✅ <b>Подписка активна</b>\n📅 Осталось дней: <b>{sub_status['days_left']}</b>\n"
+        else:
+            sub_info = "😢 <b>Пробный период закончился</b>\n💳 Можете приобрести подписку\n"
+        
+        caption_text = (
+            "<b>👋 Добро пожаловать!</b>\n\n"
+            "Этот бот создан для сохранения всех деталей переписки, "
+            "даже в случае их изменения или удаления 🤫\n\n"
+            f"{sub_info}\n"
+            f"📊 <b>Статистика:</b>\n"
+            f"📨 Сообщений: <b>{stats['messages']}</b>\n"
+            f"✏️ Изменений: <b>{stats['edits']}</b>\n"
+            f"🗑 Удалений: <b>{stats['deletes']}</b>\n\n"
+            f"<b>Доступные команды:</b>\n"
+            f"/stats - показать статистику\n"
+            f"/help - справка"
+        )
+        
+        # Send photo
+        try:
+            await bot.send_photo(
+                user_id,
+                FSInputFile("photo_2025-12-29_00-18-36.jpg"),
+                caption=caption_text,
+                parse_mode="HTML",
+                reply_markup=keyboard
+            )
+        except:
+            await bot.send_message(user_id, caption_text, parse_mode="HTML", reply_markup=keyboard)
     
     @dp.callback_query(F.data.startswith("sub_"))
     async def callback_subscribe(callback):
