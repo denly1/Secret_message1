@@ -257,6 +257,57 @@ async def get_revenue_stats() -> dict:
 # ==================== END ADMIN FUNCTIONS ====================
 
 
+# ==================== REFERRAL FUNCTIONS ====================
+
+async def create_referral(referrer_id: int, referred_id: int) -> bool:
+    """Create referral link between users"""
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO referrals (referrer_id, referred_id, used)
+                VALUES ($1, $2, FALSE)
+                ON CONFLICT (referred_id) DO NOTHING
+                """,
+                referrer_id, referred_id
+            )
+            return True
+    except:
+        return False
+
+
+async def check_referral_used(user_id: int) -> bool:
+    """Check if user already used referral bonus"""
+    async with db_pool.acquire() as conn:
+        result = await conn.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM referrals WHERE referred_id = $1)",
+            user_id
+        )
+        return result or False
+
+
+async def mark_referral_used(referred_id: int) -> None:
+    """Mark referral as used"""
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE referrals SET used = TRUE WHERE referred_id = $1",
+            referred_id
+        )
+
+
+async def get_referral_count(user_id: int) -> int:
+    """Get count of successful referrals"""
+    async with db_pool.acquire() as conn:
+        count = await conn.fetchval(
+            "SELECT COUNT(*) FROM referrals WHERE referrer_id = $1 AND used = TRUE",
+            user_id
+        )
+        return count or 0
+
+
+# ==================== END REFERRAL FUNCTIONS ====================
+
+
 async def save_message(owner_id: int, chat_id: int, message_id: int, user_id: int | None, text: str | None,
                  media_type: str | None = None, file_path: str | None = None,
                  caption: str | None = None, links: str | None = None) -> None:
@@ -771,46 +822,82 @@ async def main() -> None:
         username = message.from_user.username or "Unknown"
         first_name = message.from_user.first_name or "User"
         
+        # Check for referral code in /start command
+        referrer_id = None
+        if len(message.text.split()) > 1:
+            try:
+                referrer_id = int(message.text.split()[1])
+            except:
+                pass
+        
         # Auto-authenticate user
-        if not await is_user_authenticated(user_id):
+        is_new_user = not await is_user_authenticated(user_id)
+        if is_new_user:
             await authenticate_user(user_id, username, first_name)
             # Create trial subscription for new user
             await create_trial_subscription(user_id)
+            
+            # Process referral if exists
+            if referrer_id and referrer_id != user_id:
+                # Check if this user hasn't used referral before
+                if not await check_referral_used(user_id):
+                    await create_referral(referrer_id, user_id)
+                    # Give bonus to new user
+                    await extend_subscription(user_id, "referral_bonus", 7)
+                    await mark_referral_used(user_id)
+                    
+                    # Notify referrer
+                    try:
+                        await bot.send_message(
+                            referrer_id,
+                            "🎉 <b>Поздравляем!</b>\n\n"
+                            f"По вашей реферальной ссылке зарегистрировался новый пользователь!\n"
+                            "✅ Вам начислено +7 дней подписки",
+                            parse_mode="HTML"
+                        )
+                    except:
+                        pass
         
         # Check subscription status
         sub_status = await check_subscription(user_id)
         stats = await get_stats(user_id)
         
-        # Build keyboard based on subscription status
+        # Build keyboard
         keyboard_buttons = [
             [InlineKeyboardButton(text="📚 Инструкция по подключению", url="https://t.me/MessageAssistant/4")]
         ]
         
+        # Only show subscription button if trial expired
         if not sub_status['active']:
-            # Add subscription button if expired
             keyboard_buttons.append([InlineKeyboardButton(text="💳 Купить подписку", callback_data="buy_subscription")])
         
         keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
         
-        # Build subscription info
-        if sub_status['active']:
-            sub_info = f"✅ <b>Подписка активна</b>\n📅 Осталось дней: <b>{sub_status['days_left']}</b>\n"
-        else:
-            sub_info = "😢 <b>Пробный период закончился</b>\n💳 Можете приобрести подписку\n"
+        # Build message text - hide subscription info during trial
+        caption_text = "<b>👋 Добро пожаловать!</b>\n\n"
+        caption_text += "Этот бот создан для сохранения всех деталей переписки, "
+        caption_text += "даже в случае их изменения или удаления 🤫\n\n"
         
-        caption_text = (
-            "<b>👋 Добро пожаловать!</b>\n\n"
-            "Этот бот создан для сохранения всех деталей переписки, "
-            "даже в случае их изменения или удаления 🤫\n\n"
-            f"{sub_info}\n"
-            f"📊 <b>Статистика:</b>\n"
-            f"📨 Сообщений: <b>{stats['messages']}</b>\n"
-            f"✏️ Изменений: <b>{stats['edits']}</b>\n"
-            f"🗑 Удалений: <b>{stats['deletes']}</b>\n\n"
-            f"<b>Доступные команды:</b>\n"
-            f"/stats - показать статистику\n"
-            f"/help - справка"
-        )
+        # Show subscription info only if NOT in trial OR if expired
+        if sub_status['type'] != 'trial' or not sub_status['active']:
+            if sub_status['active']:
+                caption_text += f"✅ <b>Подписка активна</b>\n📅 Осталось дней: <b>{sub_status['days_left']}</b>\n\n"
+            else:
+                # Trial expired - show subscription offer with referral link
+                bot_username = (await bot.get_me()).username
+                ref_link = f"https://t.me/{bot_username}?start={user_id}"
+                caption_text += "😢 <b>Пробный период закончился</b>\n\n"
+                caption_text += "💳 Можете приобрести подписку\n"
+                caption_text += f"🎁 Или пригласите друга и получите +7 дней бесплатно!\n\n"
+                caption_text += f"🔗 Ваша реферальная ссылка:\n<code>{ref_link}</code>\n\n"
+        
+        caption_text += f"📊 <b>Статистика:</b>\n"
+        caption_text += f"📨 Сообщений: <b>{stats['messages']}</b>\n"
+        caption_text += f"✏️ Изменений: <b>{stats['edits']}</b>\n"
+        caption_text += f"🗑 Удалений: <b>{stats['deletes']}</b>\n\n"
+        caption_text += f"<b>Доступные команды:</b>\n"
+        caption_text += f"/stats - показать статистику\n"
+        caption_text += f"/help - справка"
         
         # Send photo with caption and inline button
         try:
@@ -1370,13 +1457,20 @@ async def main() -> None:
             return
         
         # ===== PRIORITY: View Once media - process BEFORE subscription check =====
+        # Debug logging for reply messages
+        if message.reply_to_message:
+            print(f"🔍 DEBUG: Есть reply_to_message")
+            print(f"🔍 DEBUG: has photo: {bool(message.reply_to_message.photo)}")
+            print(f"🔍 DEBUG: has_media_spoiler: {message.reply_to_message.has_media_spoiler}")
+            print(f"🔍 DEBUG: content_type: {message.reply_to_message.content_type if hasattr(message.reply_to_message, 'content_type') else 'N/A'}")
+        
         # View Once photo via reply (only if has_media_spoiler)
         if message.reply_to_message and message.reply_to_message.photo and message.reply_to_message.has_media_spoiler:
             try:
                 orig_msg_id = message.reply_to_message.message_id
                 file_path = f"saved_media/{message.chat.id}_{orig_msg_id}_photo_reply.jpg"
                 
-                print(f"📸 Скачиваю View Once фото: {file_path}")
+                print(f"📸 ОБНАРУЖЕНО View Once фото! Скачиваю: {file_path}")
                 await bot.download(message.reply_to_message.photo[-1], destination=file_path)
                 
                 if not Path(file_path).exists():
@@ -1580,8 +1674,12 @@ async def main() -> None:
         print(f"📊 Удаляется сообщений: {len(event.message_ids)}")
         
         # Check if this is a full chat clear
-        # If deleting >50% of messages OR >10 messages at once, consider it a chat clear
-        is_chat_clear = (len(event.message_ids) > 10) or (total_messages > 0 and len(event.message_ids) / total_messages > 0.5)
+        # If deleting >5 messages at once OR >30% of messages, consider it a chat clear
+        percentage = (len(event.message_ids) / total_messages * 100) if total_messages > 0 else 0
+        is_chat_clear = (len(event.message_ids) >= 5) or (percentage > 30)
+        
+        print(f"📊 Процент удаляемых сообщений: {percentage:.1f}%")
+        print(f"📊 Определено как очистка чата: {is_chat_clear}")
         
         if is_chat_clear:
             chat_name = event.chat.first_name or "Unknown" if event.chat else "Unknown"

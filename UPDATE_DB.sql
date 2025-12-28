@@ -56,8 +56,23 @@ ON CONFLICT (user_id) DO NOTHING;
 -- Индекс для админов
 CREATE INDEX IF NOT EXISTS idx_admins_user ON admins(user_id);
 
+-- Таблица реферальной системы
+CREATE TABLE IF NOT EXISTS referrals (
+    id SERIAL PRIMARY KEY,
+    referrer_id BIGINT NOT NULL,
+    referred_id BIGINT NOT NULL,
+    used BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(referred_id)
+);
+
+-- Индексы для реферальной системы
+CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals(referrer_id);
+CREATE INDEX IF NOT EXISTS idx_referrals_referred ON referrals(referred_id);
+
 -- Комментарии
 COMMENT ON TABLE business_connections IS 'Подключения к Telegram Business API';
 COMMENT ON TABLE subscriptions IS 'Подписки пользователей на бота';
 COMMENT ON TABLE payment_history IS 'История платежей пользователей';
 COMMENT ON TABLE admins IS 'Администраторы бота';
+COMMENT ON TABLE referrals IS 'Реферальная система - приглашения пользователей';
