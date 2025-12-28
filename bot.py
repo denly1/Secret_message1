@@ -4,11 +4,9 @@ from pathlib import Path
 from typing import Optional
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, BusinessMessagesDeleted, FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.types import Message, BusinessMessagesDeleted, FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
 import asyncpg
-import aiohttp
-import json
 
 load_dotenv()
 
@@ -24,10 +22,6 @@ DB_PORT = int(os.getenv("DB_PORT", "5432"))
 DB_NAME = os.getenv("DB_NAME", "Secret_message")
 DB_USER = os.getenv("DB_USER", "postgres")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "1")
-
-# AI API settings
-AI_API_KEY = os.getenv("AI_API_KEY", "")
-AI_API_URL = os.getenv("AI_API_URL", "https://api.openai.com/v1/chat/completions")
 
 # Global database pool
 db_pool = None
@@ -58,18 +52,7 @@ async def init_db():
                 connected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        
-        # Create ai_settings table for AI mode configuration
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS ai_settings (
-                user_id BIGINT PRIMARY KEY,
-                ai_mode_enabled BOOLEAN DEFAULT FALSE,
-                system_prompt TEXT,
-                last_prompt_update TIMESTAMP,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-    print("✅ Business connections and AI settings tables ready")
+    print("✅ Business connections table ready")
 
 
 async def close_db():
@@ -277,186 +260,6 @@ async def get_user_by_connection(connection_id: str) -> Optional[int]:
         return user_id
 
 
-async def get_ai_mode_status(user_id: int) -> bool:
-    """Check if AI mode is enabled for user"""
-    async with db_pool.acquire() as conn:
-        result = await conn.fetchval(
-            "SELECT ai_mode_enabled FROM ai_settings WHERE user_id = $1",
-            user_id
-        )
-        return result is True
-
-
-async def toggle_ai_mode(user_id: int) -> bool:
-    """Toggle AI mode for user and return new status"""
-    async with db_pool.acquire() as conn:
-        current = await conn.fetchval(
-            "SELECT ai_mode_enabled FROM ai_settings WHERE user_id = $1",
-            user_id
-        )
-        
-        new_status = not (current is True)
-        
-        await conn.execute(
-            """
-            INSERT INTO ai_settings (user_id, ai_mode_enabled)
-            VALUES ($1, $2)
-            ON CONFLICT (user_id) DO UPDATE
-            SET ai_mode_enabled = $2
-            """,
-            user_id, new_status
-        )
-        
-        return new_status
-
-
-async def get_last_messages(user_id: int, chat_id: int, limit: int = 300) -> list:
-    """Get last N messages for AI prompt generation from specific chat"""
-    async with db_pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT text, caption, user_id, created_at
-            FROM messages
-            WHERE owner_id = $1 AND chat_id = $2
-            ORDER BY created_at DESC
-            LIMIT $3
-            """,
-            user_id, chat_id, limit
-        )
-        return [dict(row) for row in rows]
-
-
-async def save_ai_prompt(user_id: int, chat_id: int, prompt: str) -> None:
-    """Save generated AI prompt for specific chat"""
-    async with db_pool.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO ai_settings (user_id, system_prompt, last_prompt_update)
-            VALUES ($1, $2, NOW())
-            ON CONFLICT (user_id) DO UPDATE
-            SET system_prompt = $2, last_prompt_update = NOW()
-            """,
-            user_id, prompt
-        )
-        print(f"💾 Saved AI prompt for user {user_id}, chat {chat_id}")
-
-
-async def get_ai_prompt(user_id: int, chat_id: int = None) -> Optional[str]:
-    """Get saved AI prompt for user (chat_id unused for now, using global prompt)"""
-    async with db_pool.acquire() as conn:
-        result = await conn.fetchval(
-            "SELECT system_prompt FROM ai_settings WHERE user_id = $1",
-            user_id
-        )
-        return result
-
-
-async def clear_messages_for_chat(user_id: int, chat_id: int = None) -> None:
-    """Clear all messages after AI prompt generation"""
-    async with db_pool.acquire() as conn:
-        if chat_id:
-            await conn.execute(
-                "DELETE FROM messages WHERE owner_id = $1 AND chat_id = $2",
-                user_id, chat_id
-            )
-        else:
-            await conn.execute(
-                "DELETE FROM messages WHERE owner_id = $1",
-                user_id
-            )
-
-
-async def generate_ai_prompt(messages: list, user_id: int) -> str:
-    """Generate AI prompt based on user's message history"""
-    if not messages:
-        return "Ты дружелюбный помощник, который отвечает на сообщения."
-    
-    owner_messages = []
-    other_messages = []
-    
-    for msg in reversed(messages):
-        text = msg.get('text') or msg.get('caption') or ''
-        if text.strip():
-            if msg.get('user_id') == user_id:
-                owner_messages.append(text)
-            else:
-                other_messages.append(text)
-    
-    prompt = f"""Ты должен отвечать на сообщения точно в стиле и манере общения пользователя.
-
-Примеры сообщений пользователя:
-{chr(10).join(f'- {msg}' for msg in owner_messages[:50])}
-
-Анализируй:
-1. Стиль общения (формальный/неформальный)
-2. Использование эмодзи и сленга
-3. Длину сообщений
-4. Тон и настроение
-5. Типичные фразы и выражения
-
-Отвечай ТОЧНО в таком же стиле, как будто это пишет сам пользователь."""
-    
-    return prompt
-
-
-async def send_ai_response(chat_id: int, message_text: str, user_id: int, bot: Bot) -> None:
-    """Send AI-generated response to chat - auto-creates prompt if needed"""
-    if not AI_API_KEY:
-        print("⚠️ AI API key not configured")
-        return
-    
-    # Check if we have a prompt for this user
-    prompt = await get_ai_prompt(user_id, chat_id)
-    
-    # If no prompt exists, create one from chat history
-    if not prompt:
-        print(f"📝 No AI prompt found, creating from chat {chat_id} history...")
-        messages = await get_last_messages(user_id, chat_id, 300)
-        
-        if messages and len(messages) >= 10:
-            prompt = await generate_ai_prompt(messages, user_id)
-            await save_ai_prompt(user_id, chat_id, prompt)
-            print(f"✅ Created AI prompt from {len(messages)} messages")
-        else:
-            print(f"⚠️ Not enough messages ({len(messages)}) to create AI prompt, need at least 10")
-            # Use default prompt
-            prompt = "Ты дружелюбный помощник. Отвечай кратко и по делу в неформальном стиле."
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            headers = {
-                "Authorization": f"Bearer {AI_API_KEY}",
-                "Content-Type": "application/json"
-            }
-            
-            data = {
-                "model": "gpt-3.5-turbo",
-                "messages": [
-                    {"role": "system", "content": prompt},
-                    {"role": "user", "content": message_text}
-                ],
-                "temperature": 0.9,
-                "max_tokens": 500
-            }
-            
-            print(f"📡 Sending AI request to {AI_API_URL}...")
-            
-            async with session.post(AI_API_URL, headers=headers, json=data) as response:
-                if response.status == 200:
-                    result = await response.json()
-                    ai_message = result['choices'][0]['message']['content']
-                    
-                    await bot.send_message(chat_id, ai_message)
-                    print(f"🤖 AI response sent to chat {chat_id}: {ai_message[:50]}...")
-                else:
-                    error_text = await response.text()
-                    print(f"❌ AI API error: {response.status} - {error_text}")
-    except Exception as e:
-        print(f"❌ Error sending AI response: {e}")
-        import traceback
-        traceback.print_exc()
-
-
 def to_fancy(text: str) -> str:
     fancy_map = {
         'A': '𝓐', 'B': '𝓑', 'C': '𝓒', 'D': '𝓓', 'E': '𝓔', 'F': '𝓕', 'G': '𝓖', 'H': '𝓗', 'I': '𝓘', 'J': '𝓙',
@@ -467,6 +270,270 @@ def to_fancy(text: str) -> str:
         'u': '𝓾', 'v': '𝓿', 'w': '𝔀', 'x': '𝔁', 'y': '𝔂', 'z': '𝔃'
     }
     return ''.join(fancy_map.get(c, c) for c in text)
+
+
+async def create_chat_html_backup(owner_id: int, chat_id: int, chat_name: str) -> str:
+    """Create HTML backup of entire chat history"""
+    async with db_pool.acquire() as conn:
+        messages = await conn.fetch(
+            """
+            SELECT message_id, user_id, text, caption, media_type, created_at
+            FROM messages
+            WHERE owner_id = $1 AND chat_id = $2
+            ORDER BY created_at ASC
+            """,
+            owner_id, chat_id
+        )
+    
+    if not messages:
+        return None
+    
+    html_content = f"""
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Резервная копия чата - {chat_name}</title>
+    <style>
+        * {{
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #0f1419 0%, #1a1f2e 100%);
+            color: #ffffff;
+            min-height: 100vh;
+            padding: 0;
+        }}
+        .chat-container {{
+            max-width: 680px;
+            margin: 0 auto;
+            background: #0d1117;
+            min-height: 100vh;
+            box-shadow: 0 0 40px rgba(0,0,0,0.5);
+        }}
+        .chat-header {{
+            background: linear-gradient(90deg, #1e2936 0%, #2d3748 100%);
+            padding: 18px 20px;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            backdrop-filter: blur(10px);
+        }}
+        .chat-avatar {{
+            width: 42px;
+            height: 42px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+            font-weight: 600;
+            color: white;
+            flex-shrink: 0;
+        }}
+        .chat-info {{
+            flex: 1;
+        }}
+        .chat-name {{
+            font-size: 16px;
+            font-weight: 600;
+            color: #ffffff;
+            margin-bottom: 2px;
+        }}
+        .chat-status {{
+            font-size: 13px;
+            color: #8b949e;
+        }}
+        .messages-container {{
+            padding: 20px 15px;
+            background: #0d1117;
+        }}
+        .message-wrapper {{
+            display: flex;
+            margin-bottom: 12px;
+            align-items: flex-end;
+            gap: 8px;
+        }}
+        .message-wrapper.outgoing {{
+            flex-direction: row-reverse;
+        }}
+        .message-avatar {{
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 14px;
+            font-weight: 600;
+            color: white;
+            flex-shrink: 0;
+        }}
+        .message-wrapper.outgoing .message-avatar {{
+            background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+        }}
+        .message-bubble {{
+            max-width: 65%;
+            padding: 10px 14px;
+            border-radius: 18px;
+            position: relative;
+            word-wrap: break-word;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.3);
+        }}
+        .message-wrapper.incoming .message-bubble {{
+            background: linear-gradient(135deg, #2d3748 0%, #1e2936 100%);
+            border-bottom-left-radius: 4px;
+        }}
+        .message-wrapper.outgoing .message-bubble {{
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-bottom-right-radius: 4px;
+        }}
+        .message-sender {{
+            font-size: 13px;
+            font-weight: 600;
+            margin-bottom: 4px;
+            opacity: 0.9;
+        }}
+        .message-wrapper.incoming .message-sender {{
+            color: #58a6ff;
+        }}
+        .message-wrapper.outgoing .message-sender {{
+            color: #ffffff;
+        }}
+        .message-text {{
+            font-size: 15px;
+            line-height: 1.4;
+            color: #ffffff;
+            margin-bottom: 4px;
+        }}
+        .message-media {{
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 10px;
+            background: rgba(255,255,255,0.1);
+            border-radius: 12px;
+            font-size: 13px;
+            margin-top: 6px;
+            color: #58a6ff;
+        }}
+        .message-time {{
+            font-size: 11px;
+            color: rgba(255,255,255,0.5);
+            text-align: right;
+            margin-top: 2px;
+        }}
+        .date-divider {{
+            text-align: center;
+            margin: 20px 0;
+            position: relative;
+        }}
+        .date-divider span {{
+            background: rgba(255,255,255,0.1);
+            padding: 6px 16px;
+            border-radius: 12px;
+            font-size: 13px;
+            color: #8b949e;
+            display: inline-block;
+        }}
+        .chat-footer {{
+            background: linear-gradient(90deg, #1e2936 0%, #2d3748 100%);
+            padding: 15px 20px;
+            border-top: 1px solid rgba(255,255,255,0.1);
+            text-align: center;
+            color: #8b949e;
+            font-size: 13px;
+        }}
+        .stats-badge {{
+            display: inline-block;
+            background: rgba(102, 126, 234, 0.2);
+            color: #667eea;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-weight: 600;
+            margin-top: 8px;
+        }}
+    </style>
+</head>
+<body>
+    <div class="chat-container">
+        <div class="chat-header">
+            <div class="chat-avatar">{chat_name[0].upper()}</div>
+            <div class="chat-info">
+                <div class="chat-name">{chat_name}</div>
+                <div class="chat-status">Резервная копия • {__import__('datetime').datetime.now().strftime('%d.%m.%Y %H:%M')}</div>
+            </div>
+        </div>
+        <div class="messages-container">
+"""
+    
+    last_date = None
+    for msg in messages:
+        is_owner = msg['user_id'] == owner_id
+        sender_name = "Вы" if is_owner else chat_name
+        wrapper_class = "message-wrapper outgoing" if is_owner else "message-wrapper incoming"
+        text = msg['text'] or msg['caption'] or ""
+        media_info = ""
+        
+        # Date divider
+        msg_date = msg['created_at'].strftime('%d.%m.%Y')
+        if msg_date != last_date:
+            html_content += f'<div class="date-divider"><span>{msg_date}</span></div>\n'
+            last_date = msg_date
+        
+        if msg['media_type']:
+            media_types = {
+                'photo': '📷 Фото',
+                'video': '🎥 Видео',
+                'document': '📄 Документ',
+                'sticker': '🎭 Стикер',
+                'voice': '🎤 Голосовое',
+                'video_note': '🎬 Видеосообщение',
+                'animation': '🎬 GIF'
+            }
+            media_info = f'<div class="message-media">{media_types.get(msg["media_type"], "📎 Медиа")}</div>'
+        
+        time_str = msg['created_at'].strftime('%H:%M')
+        avatar_letter = sender_name[0].upper()
+        
+        html_content += f"""
+            <div class="{wrapper_class}">
+                <div class="message-avatar">{avatar_letter}</div>
+                <div class="message-bubble">
+                    <div class="message-text">{text if text else '<i>Медиа без текста</i>'}</div>
+                    {media_info}
+                    <div class="message-time">{time_str}</div>
+                </div>
+            </div>
+"""
+    
+    html_content += f"""
+        </div>
+        <div class="chat-footer">
+            <div>MessageGuardian • Резервная копия чата</div>
+            <div class="stats-badge">Всего сообщений: {len(messages)}</div>
+        </div>
+    </div>
+</body>
+</html>
+"""
+    
+    # Save HTML file
+    filename = f"saved_media/chat_backup_{chat_id}_{__import__('datetime').datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+    with open(filename, 'w', encoding='utf-8') as f:
+        f.write(html_content)
+    
+    return filename
 
 
 async def main() -> None:
@@ -486,122 +553,44 @@ async def main() -> None:
         username = message.from_user.username or "Unknown"
         first_name = message.from_user.first_name or "User"
         
-        if await is_user_banned(user_id):
-            await message.answer(
-                "🚫 <b>Доступ запрещён</b>\n\n"
-                "Вы заблокированы за превышение лимита попыток входа.",
-                parse_mode="HTML"
-            )
-            return
+        # Auto-authenticate user
+        if not await is_user_authenticated(user_id):
+            await authenticate_user(user_id, username, first_name)
         
-        if await is_user_authenticated(user_id):
-            stats = await get_stats(user_id)
-            ai_enabled = await get_ai_mode_status(user_id)
-            
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="📊 Статистика", callback_data="show_stats"),
-                    InlineKeyboardButton(text="🤖 AI-режим", callback_data="toggle_ai")
-                ],
-                [
-                    InlineKeyboardButton(text="📝 Создать AI-профиль", callback_data="generate_prompt")
-                ],
-                [
-                    InlineKeyboardButton(text="❓ Помощь", callback_data="show_help")
-                ]
-            ])
-            
-            ai_status = "🟢 Включён" if ai_enabled else "🔴 Выключен"
-            
-            await message.answer(
-                f"✅ <b>Вы авторизованы!</b>\n\n"
-                f"🤖 <b>MessageGuardian Multi-User Bot</b>\n\n"
-                f"📊 <b>Статистика:</b>\n"
-                f"📨 Сообщений: <b>{stats['messages']}</b>\n"
-                f"✏️ Изменений: <b>{stats['edits']}</b>\n"
-                f"🗑 Удалений: <b>{stats['deletes']}</b>\n\n"
-                f"🤖 <b>AI-режим:</b> {ai_status}\n\n"
-                f"Используйте кнопки ниже для управления:",
+        stats = await get_stats(user_id)
+        
+        # Inline keyboard with instruction link
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📚 Инструкция по подключению", url="https://t.me/MessageAssistant/4")]
+        ])
+        
+        caption_text = (
+            "<b>👋 Добро пожаловать!</b>\n\n"
+            "Этот бот создан для сохранения всех деталей переписки, "
+            "даже в случае их изменения или удаления 🤫\n\n"
+            f"📊 <b>Статистика:</b>\n"
+            f"📨 Сообщений: <b>{stats['messages']}</b>\n"
+            f"✏️ Изменений: <b>{stats['edits']}</b>\n"
+            f"🗑 Удалений: <b>{stats['deletes']}</b>\n\n"
+            f"<b>Доступные команды:</b>\n"
+            f"/stats - показать статистику\n"
+            f"/help - справка"
+        )
+        
+        # Send photo with caption and inline button
+        try:
+            await bot.send_photo(
+                user_id,
+                FSInputFile("photo_2025-12-29_00-18-36.jpg"),
+                caption=caption_text,
                 parse_mode="HTML",
                 reply_markup=keyboard
             )
-            return
-        
-        await message.answer(
-            "🔐 <b>Добро пожаловать в MessageGuardian!</b>\n\n"
-            "Для доступа к боту введите пароль:",
-            parse_mode="HTML"
-        )
+        except Exception as e:
+            print(f"❌ Ошибка отправки фото: {e}")
+            # Fallback to text message if photo fails
+            await message.answer(caption_text, parse_mode="HTML", reply_markup=keyboard)
     
-    @dp.message(F.text & ~F.text.startswith('/'))
-    async def handle_password(message: Message):
-        user_id = message.from_user.id
-        username = message.from_user.username or "Unknown"
-        first_name = message.from_user.first_name or "User"
-        
-        if await is_user_banned(user_id):
-            await message.answer("🚫 <b>Доступ запрещён</b>", parse_mode="HTML")
-            return
-        
-        if await is_user_authenticated(user_id):
-            return
-        
-        if message.text == BOT_PASSWORD:
-            await authenticate_user(user_id, username, first_name)
-            await message.answer(
-                "✅ <b>Авторизация успешна!</b>\n\n"
-                "🤖 <b>MessageGuardian Multi-User Bot</b>\n\n"
-                "Теперь подключите меня к бизнес-аккаунту:\n"
-                "1. Настройки → Telegram для бизнеса\n"
-                "2. Раздел 'Бот' → укажите мой @username\n"
-                "3. Выберите 'Все личные чаты'\n"
-                "4. Включите 'Сообщения 5/5'\n\n"
-                "Я буду сохранять ВСЁ:\n"
-                "🖼 Фото (включая View Once)\n"
-                "🎥 Видео (включая исчезающие)\n"
-                "🎭 Стикеры\n"
-                "📄 Документы\n"
-                "🎤 Голосовые\n"
-                "🎬 GIF/Анимации\n\n"
-                "💡 <b>Для View Once фото/видео:</b>\n"
-                "Ответьте на медиа — я сохраню его!\n\n"
-                "Команды:\n"
-                "/stats - статистика\n"
-                "/help - помощь",
-                parse_mode="HTML"
-            )
-            print(f"✅ Пользователь {first_name} (@{username}, ID: {user_id}) авторизован")
-        else:
-            attempts = await record_failed_login(user_id, username, first_name)
-            
-            if attempts >= 3:
-                await ban_user(user_id, username, first_name)
-                await message.answer(
-                    "🚫 <b>Доступ заблокирован!</b>\n\n"
-                    "Превышен лимит попыток входа (3).",
-                    parse_mode="HTML"
-                )
-                print(f"🚫 Пользователь {first_name} (@{username}, ID: {user_id}) ЗАБЛОКИРОВАН")
-                
-                if ADMIN_ID:
-                    try:
-                        await bot.send_message(
-                            ADMIN_ID,
-                            f"🚫 <b>Пользователь заблокирован</b>\n\n"
-                            f"👤 {first_name} (@{username})\n"
-                            f"🆔 ID: <code>{user_id}</code>\n"
-                            f"❌ Попыток: {attempts}",
-                            parse_mode="HTML"
-                        )
-                    except:
-                        pass
-            else:
-                remaining = 3 - attempts
-                await message.answer(
-                    f"❌ <b>Неверный пароль!</b>\n\n"
-                    f"Осталось попыток: <b>{remaining}</b>",
-                    parse_mode="HTML"
-                )
     
     @dp.message(Command("stats"))
     async def cmd_stats(message: Message):
@@ -629,18 +618,27 @@ async def main() -> None:
             return
         
         await message.answer(
-            "📖 <b>Помощь MessageGuardian</b>\n\n"
-            "<b>Команды:</b>\n"
-            "/start - авторизация\n"
-            "/stats - статистика\n"
-            "/help - эта справка\n\n"
-            "<b>Как работает:</b>\n"
-            "• Сохраняет все сообщения\n"
-            "• Уведомляет об удалениях\n"
-            "• Работает только с вашими чатами\n"
-            "• Автоудаление из БД после уведомления\n\n"
-            "<b>View Once медиа:</b>\n"
-            "Ответьте на медиа — бот сохранит его",
+            "📖 <b>Инструкция MessageGuardian</b>\n\n"
+            "🤖 <b>Что делает бот:</b>\n"
+            "• Сохраняет все удалённые сообщения\n"
+            "• Отслеживает изменения в сообщениях\n"
+            "• Сохраняет View Once фото/видео\n"
+            "• Создаёт HTML-копию при очистке чата\n\n"
+            "🔧 <b>Как подключить:</b>\n"
+            "1. Откройте Настройки → Telegram Business\n"
+            "2. Раздел 'Чаты' → 'Подключить бота'\n"
+            "3. Найдите @MessageGuardianBot\n"
+            "4. Выберите 'Все личные чаты'\n\n"
+            "💡 <b>Как сохранить View Once медиа:</b>\n"
+            "• Ответьте на исчезающее фото/видео\n"
+            "• Бот автоматически сохранит его\n"
+            "• Вы получите уведомление с медиа\n\n"
+            "📊 <b>Команды:</b>\n"
+            "/start - главное меню\n"
+            "/stats - статистика сообщений\n"
+            "/help - эта инструкция\n\n"
+            "⚠️ <b>Важно:</b>\n"
+            "Бот работает только с вашими бизнес-чатами и автоматически удаляет данные из БД после отправки уведомления.",
             parse_mode="HTML"
         )
     
@@ -671,159 +669,7 @@ async def main() -> None:
         
         await message.answer(text, parse_mode="HTML")
     
-    @dp.message(Command("ai_mode"))
-    async def cmd_ai_mode(message: Message):
-        user_id = message.from_user.id
-        
-        if not await is_user_authenticated(user_id):
-            await message.answer("🔐 Сначала авторизуйтесь: /start")
-            return
-        
-        new_status = await toggle_ai_mode(user_id)
-        
-        if new_status:
-            await message.answer(
-                "🤖 <b>AI-режим ВКЛЮЧЁН</b>\n\n"
-                "Теперь бот будет автоматически отвечать на входящие сообщения в вашем стиле!\n\n"
-                "📝 <b>Как это работает:</b>\n"
-                "• Когда вам пишет собеседник, бот анализирует последние 300 сообщений из этого чата\n"
-                "• Создает AI-профиль на основе вашего стиля общения с этим человеком\n"
-                "• Отвечает автоматически в вашем стиле\n\n"
-                "🤖 Просто ждите входящие сообщения - всё работает автоматически!\n\n"
-                "Чтобы выключить: /ai_mode",
-                parse_mode="HTML"
-            )
-        else:
-            await message.answer(
-                "🔴 <b>AI-режим ВЫКЛЮЧЁН</b>\n\n"
-                "Бот вернулся в обычный режим - только уведомления об удалённых сообщениях.\n\n"
-                "Чтобы включить: /ai_mode",
-                parse_mode="HTML"
-            )
     
-    @dp.message(Command("generate_prompt"))
-    async def cmd_generate_prompt(message: Message):
-        user_id = message.from_user.id
-        
-        if not await is_user_authenticated(user_id):
-            await message.answer("🔐 Сначала авторизуйтесь: /start")
-            return
-        
-        if not await get_ai_mode_status(user_id):
-            await message.answer("⚠️ Сначала включите AI-режим: /ai_mode")
-            return
-        
-        await message.answer(
-            "ℹ️ <b>AI-профиль создается автоматически!</b>\n\n"
-            "Когда вам пишет собеседник, бот:\n"
-            "1️⃣ Анализирует последние 300 сообщений из этого чата\n"
-            "2️⃣ Создает AI-профиль на основе вашего стиля общения с этим человеком\n"
-            "3️⃣ Отвечает в вашем стиле автоматически\n\n"
-            "🤖 Просто включите AI-режим и ждите входящие сообщения!",
-            parse_mode="HTML"
-        )
-    
-    @dp.callback_query(F.data == "show_stats")
-    async def callback_show_stats(callback: CallbackQuery):
-        user_id = callback.from_user.id
-        
-        if not await is_user_authenticated(user_id):
-            await callback.answer("🔐 Сначала авторизуйтесь: /start", show_alert=True)
-            return
-        
-        stats = await get_stats(user_id)
-        await callback.message.answer(
-            f"📊 <b>Ваша статистика MessageGuardian</b>\n\n"
-            f"📨 Всего сообщений: <b>{stats['messages']}</b>\n"
-            f"✏️ Изменений: <b>{stats['edits']}</b>\n"
-            f"🗑 Удалений: <b>{stats['deletes']}</b>",
-            parse_mode="HTML"
-        )
-        await callback.answer()
-    
-    @dp.callback_query(F.data == "toggle_ai")
-    async def callback_toggle_ai(callback: CallbackQuery):
-        user_id = callback.from_user.id
-        
-        if not await is_user_authenticated(user_id):
-            await callback.answer("🔐 Сначала авторизуйтесь: /start", show_alert=True)
-            return
-        
-        new_status = await toggle_ai_mode(user_id)
-        
-        if new_status:
-            await callback.message.answer(
-                "🤖 <b>AI-режим ВКЛЮЧЁН</b>\n\n"
-                "Теперь бот будет автоматически отвечать на входящие сообщения в вашем стиле!\n\n"
-                "📝 <b>Как это работает:</b>\n"
-                "• Когда вам пишет собеседник, бот анализирует последние 300 сообщений из этого чата\n"
-                "• Создает AI-профиль на основе вашего стиля общения с этим человеком\n"
-                "• Отвечает автоматически в вашем стиле\n\n"
-                "🤖 Просто ждите входящие сообщения - всё работает автоматически!",
-                parse_mode="HTML"
-            )
-        else:
-            await callback.message.answer(
-                "🔴 <b>AI-режим ВЫКЛЮЧЁН</b>\n\n"
-                "Бот вернулся в обычный режим - только уведомления об удалённых сообщениях.",
-                parse_mode="HTML"
-            )
-        
-        await callback.answer(f"AI-режим: {'🟢 Включён' if new_status else '🔴 Выключен'}")
-    
-    @dp.callback_query(F.data == "generate_prompt")
-    async def callback_generate_prompt(callback: CallbackQuery):
-        user_id = callback.from_user.id
-        
-        if not await is_user_authenticated(user_id):
-            await callback.answer("🔐 Сначала авторизуйтесь: /start", show_alert=True)
-            return
-        
-        if not await get_ai_mode_status(user_id):
-            await callback.answer("⚠️ Сначала включите AI-режим!", show_alert=True)
-            return
-        
-        await callback.message.answer(
-            "ℹ️ <b>AI-профиль создается автоматически!</b>\n\n"
-            "Когда вам пишет собеседник, бот:\n"
-            "1️⃣ Анализирует последние 300 сообщений из этого чата\n"
-            "2️⃣ Создает AI-профиль на основе вашего стиля общения с этим человеком\n"
-            "3️⃣ Отвечает в вашем стиле автоматически\n\n"
-            "🤖 Просто включите AI-режим и ждите входящие сообщения!",
-            parse_mode="HTML"
-        )
-        await callback.answer("AI-профиль создается автоматически!")
-    
-    @dp.callback_query(F.data == "show_help")
-    async def callback_show_help(callback: CallbackQuery):
-        user_id = callback.from_user.id
-        
-        if not await is_user_authenticated(user_id):
-            await callback.answer("🔐 Сначала авторизуйтесь: /start", show_alert=True)
-            return
-        
-        await callback.message.answer(
-            "📖 <b>Помощь MessageGuardian</b>\n\n"
-            "<b>Команды:</b>\n"
-            "/start - главное меню\n"
-            "/stats - статистика\n"
-            "/ai_mode - вкл/выкл AI-режим\n"
-            "/generate_prompt - создать AI-профиль\n"
-            "/help - эта справка\n\n"
-            "<b>Как работает:</b>\n"
-            "• Сохраняет все сообщения\n"
-            "• Уведомляет об удалениях\n"
-            "• Работает только с вашими чатами\n"
-            "• Автоудаление из БД после уведомления\n\n"
-            "<b>AI-режим:</b>\n"
-            "1. Включите AI-режим\n"
-            "2. Создайте AI-профиль (300 сообщений)\n"
-            "3. Бот будет отвечать в вашем стиле!\n\n"
-            "<b>View Once медиа:</b>\n"
-            "Ответьте на медиа — бот сохранит его",
-            parse_mode="HTML"
-        )
-        await callback.answer()
     
     @dp.business_connection()
     async def handle_business_connection(connection):
@@ -838,6 +684,19 @@ async def main() -> None:
         if connection.is_enabled:
             await save_business_connection(connection_id, user_id, username, first_name)
             print(f"✅ Сохранена связь: {connection_id} → {user_id}")
+            
+            # Send success notification to user
+            try:
+                await bot.send_message(
+                    user_id,
+                    "✅ <b>Бот успешно подключен!</b>\n\n"
+                    "🤖 MessageGuardian теперь отслеживает ваши бизнес-чаты.\n"
+                    "Все удаленные и измененные сообщения будут сохранены.\n\n"
+                    "💡 <b>Для View Once медиа:</b> ответьте на сообщение, чтобы сохранить его.",
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                print(f"❌ Ошибка отправки уведомления о подключении: {e}")
         else:
             print(f"❌ Отключено: {connection_id}")
     
@@ -865,49 +724,73 @@ async def main() -> None:
         media_type = None
         file_path = None
         
-        # View Once photo via reply
-        if message.reply_to_message and message.reply_to_message.photo:
+        # View Once photo via reply (only if has_media_spoiler)
+        if message.reply_to_message and message.reply_to_message.photo and message.reply_to_message.has_media_spoiler:
             try:
                 orig_msg_id = message.reply_to_message.message_id
                 file_path = f"saved_media/{message.chat.id}_{orig_msg_id}_photo_reply.jpg"
+                
+                print(f"📸 Скачиваю View Once фото: {file_path}")
                 await bot.download(message.reply_to_message.photo[-1], destination=file_path)
                 
+                if not Path(file_path).exists():
+                    print(f"❌ Файл не был создан: {file_path}")
+                    return
+                
+                print(f"✅ Файл сохранён: {file_path}, размер: {Path(file_path).stat().st_size} байт")
+                
+                user_name = message.reply_to_message.from_user.first_name if message.reply_to_message.from_user else "Unknown"
+                user_username = f" (@{message.reply_to_message.from_user.username})" if message.reply_to_message.from_user and message.reply_to_message.from_user.username else ""
+                fancy_name = to_fancy(user_name)
+                header = f"🔒 <b>View Once фото сохранено!</b>\n\n{fancy_name}{user_username} отправил(а) исчезающее фото"
+                
+                print(f"📤 Отправляю View Once фото владельцу {owner_id}")
+                await bot.send_photo(owner_id, FSInputFile(file_path), caption=header, parse_mode="HTML")
+                print(f"✅ View Once фото успешно отправлено {owner_id}")
+                
+                # Save to DB after successful send
                 await save_message(owner_id, message.chat.id, orig_msg_id,
                            message.reply_to_message.from_user.id if message.reply_to_message.from_user else None,
                            "", media_type="photo_reply", file_path=file_path,
                            caption=message.reply_to_message.caption)
+            except Exception as e:
+                print(f"❌ Ошибка View Once фото: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        # View Once video via reply (only if has_media_spoiler)
+        if message.reply_to_message and message.reply_to_message.video and message.reply_to_message.has_media_spoiler:
+            try:
+                orig_msg_id = message.reply_to_message.message_id
+                file_path = f"saved_media/{message.chat.id}_{orig_msg_id}_video_reply.mp4"
+                
+                print(f"🎥 Скачиваю View Once видео: {file_path}")
+                await bot.download(message.reply_to_message.video, destination=file_path)
+                
+                if not Path(file_path).exists():
+                    print(f"❌ Файл не был создан: {file_path}")
+                    return
+                
+                print(f"✅ Файл сохранён: {file_path}, размер: {Path(file_path).stat().st_size} байт")
                 
                 user_name = message.reply_to_message.from_user.first_name if message.reply_to_message.from_user else "Unknown"
                 user_username = f" (@{message.reply_to_message.from_user.username})" if message.reply_to_message.from_user and message.reply_to_message.from_user.username else ""
                 fancy_name = to_fancy(user_name)
-                header = f"💬 View Once фото\n{fancy_name}{user_username} отправил(а) исчезающее фото:\n\n"
+                header = f"🔒 <b>View Once видео сохранено!</b>\n\n{fancy_name}{user_username} отправил(а) исчезающее видео"
                 
-                await bot.send_photo(owner_id, FSInputFile(file_path), caption=header, parse_mode="HTML")
-                print(f"✅ View Once фото отправлено {owner_id}")
-            except Exception as e:
-                print(f"❌ Ошибка View Once фото: {e}")
-        
-        # View Once video via reply
-        if message.reply_to_message and message.reply_to_message.video:
-            try:
-                orig_msg_id = message.reply_to_message.message_id
-                file_path = f"saved_media/{message.chat.id}_{orig_msg_id}_video_reply.mp4"
-                await bot.download(message.reply_to_message.video, destination=file_path)
+                print(f"📤 Отправляю View Once видео владельцу {owner_id}")
+                await bot.send_video(owner_id, FSInputFile(file_path), caption=header, parse_mode="HTML")
+                print(f"✅ View Once видео успешно отправлено {owner_id}")
                 
+                # Save to DB after successful send
                 await save_message(owner_id, message.chat.id, orig_msg_id,
                            message.reply_to_message.from_user.id if message.reply_to_message.from_user else None,
                            "", media_type="video_reply", file_path=file_path,
                            caption=message.reply_to_message.caption)
-                
-                user_name = message.reply_to_message.from_user.first_name if message.reply_to_message.from_user else "Unknown"
-                user_username = f" (@{message.reply_to_message.from_user.username})" if message.reply_to_message.from_user and message.reply_to_message.from_user.username else ""
-                fancy_name = to_fancy(user_name)
-                header = f"💬 View Once видео\n{fancy_name}{user_username} отправил(а) исчезающее видео:\n\n"
-                
-                await bot.send_video(owner_id, FSInputFile(file_path), caption=header, parse_mode="HTML")
-                print(f"✅ View Once видео отправлено {owner_id}")
             except Exception as e:
                 print(f"❌ Ошибка View Once видео: {e}")
+                import traceback
+                traceback.print_exc()
         
         try:
             if message.photo:
@@ -961,14 +844,6 @@ async def main() -> None:
                     message.text or "", media_type=media_type, file_path=file_path,
                     caption=message.caption, links=", ".join(links) if links else None)
         await increment_stat(owner_id, "total_messages")
-        
-        # AI auto-response if enabled and message is not from owner
-        if message.from_user and message.from_user.id != owner_id:
-            if await get_ai_mode_status(owner_id):
-                message_text = message.text or message.caption or ""
-                if message_text.strip():
-                    await send_ai_response(message.chat.id, message_text, owner_id, bot)
-                    print(f"🤖 AI auto-response triggered for chat {message.chat.id}")
     
     @dp.edited_business_message()
     async def handle_edited_business_message(message: Message):
@@ -999,7 +874,23 @@ async def main() -> None:
         user_username = f" (@{message.from_user.username})" if message.from_user and message.from_user.username else ""
         fancy_name = to_fancy(user_name)
         
-        text = f"{fancy_name}{user_username} изменил(а) сообщение:\n\n<b>Old:</b>\n{old or '<i>Не найдено</i>'}\n\n<b>New:</b>\n{new}"
+        # Monospace font for Old/New text
+        def to_monospace(text: str) -> str:
+            mono_map = {
+                'A': '𝙰', 'B': '𝙱', 'C': '𝙲', 'D': '𝙳', 'E': '𝙴', 'F': '𝙵', 'G': '𝙶', 'H': '𝙷', 'I': '𝙸', 'J': '𝙹',
+                'K': '𝙺', 'L': '𝙻', 'M': '𝙼', 'N': '𝙽', 'O': '𝙾', 'P': '𝙿', 'Q': '𝚀', 'R': '𝚁', 'S': '𝚂', 'T': '𝚃',
+                'U': '𝚄', 'V': '𝚅', 'W': '𝚆', 'X': '𝚇', 'Y': '𝚈', 'Z': '𝚉',
+                'a': '𝚊', 'b': '𝚋', 'c': '𝚌', 'd': '𝚍', 'e': '𝚎', 'f': '𝚏', 'g': '𝚐', 'h': '𝚑', 'i': '𝚒', 'j': '𝚓',
+                'k': '𝚔', 'l': '𝚕', 'm': '𝚖', 'n': '𝚗', 'o': '𝚘', 'p': '𝚙', 'q': '𝚚', 'r': '𝚛', 's': '𝚜', 't': '𝚝',
+                'u': '𝚞', 'v': '𝚟', 'w': '𝚠', 'x': '𝚡', 'y': '𝚢', 'z': '𝚣',
+                '0': '𝟶', '1': '𝟷', '2': '𝟸', '3': '𝟹', '4': '𝟺', '5': '𝟻', '6': '𝟼', '7': '𝟽', '8': '𝟾', '9': '𝟿'
+            }
+            return ''.join(mono_map.get(c, c) for c in text)
+        
+        old_formatted = to_monospace(old) if old else '<i>Не найдено</i>'
+        new_formatted = to_monospace(new) if new else '<i>Пусто</i>'
+        
+        text = f"{fancy_name}{user_username} изменил(а) сообщение:\n\nOld:\n{old_formatted}\n\nNew:\n{new_formatted}"
         
         try:
             await bot.send_message(owner_id, text, parse_mode="HTML")
@@ -1009,6 +900,41 @@ async def main() -> None:
     @dp.deleted_business_messages()
     async def handle_deleted_business_messages(event: BusinessMessagesDeleted):
         print(f"🗑 Получено удаление {len(event.message_ids)} сообщений в чате {event.chat.id}")
+        
+        # Check if this is a full chat clear (many messages deleted at once)
+        is_chat_clear = len(event.message_ids) > 10
+        
+        if is_chat_clear:
+            # Get owner_id from first message
+            async with db_pool.acquire() as conn:
+                first_row = await conn.fetchrow(
+                    "SELECT owner_id FROM messages WHERE chat_id = $1 AND message_id = ANY($2) LIMIT 1",
+                    event.chat.id, event.message_ids
+                )
+            
+            if first_row:
+                owner_id = first_row['owner_id']
+                chat_name = event.chat.first_name or "Unknown" if event.chat else "Unknown"
+                
+                # Create HTML backup before deleting
+                print(f"📦 Создаю HTML-копию чата {event.chat.id}...")
+                html_file = await create_chat_html_backup(owner_id, event.chat.id, chat_name)
+                
+                if html_file:
+                    try:
+                        await bot.send_document(
+                            owner_id,
+                            FSInputFile(html_file),
+                            caption=f"🗑 <b>Весь чат был очищен!</b>\n\n"
+                                    f"👤 Чат: {chat_name}\n"
+                                    f"📊 Удалено сообщений: {len(event.message_ids)}\n\n"
+                                    f"📄 HTML-копия чата прикреплена",
+                            parse_mode="HTML"
+                        )
+                        print(f"✅ HTML-копия отправлена владельцу {owner_id}")
+                    except Exception as e:
+                        print(f"❌ Ошибка отправки HTML: {e}")
+        
         for msg_id in event.message_ids:
             async with db_pool.acquire() as conn:
                 row = await conn.fetchrow("SELECT * FROM messages WHERE chat_id = $1 AND message_id = $2", event.chat.id, msg_id)
