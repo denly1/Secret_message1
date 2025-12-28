@@ -49,6 +49,7 @@ class AdminStates(StatesGroup):
     waiting_grant_user_id = State()
     waiting_grant_days = State()
     waiting_revoke_user_id = State()
+    waiting_check_user_id = State()
 
 
 async def init_db():
@@ -324,7 +325,7 @@ async def get_users_stats() -> dict:
 
 
 async def get_detailed_users_csv() -> str:
-    """Generate detailed CSV with user statistics"""
+    """Generate detailed CSV with user statistics for Excel"""
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT 
@@ -344,25 +345,61 @@ async def get_detailed_users_csv() -> str:
             ORDER BY total_spent DESC, u.created_at DESC
         """)
         
+        # Calculate totals
+        total_users = len(rows)
+        total_revenue = sum(row['total_spent'] for row in rows)
+        total_payments = sum(row['payments_count'] for row in rows)
+        active_subs = sum(1 for row in rows if row['is_active'])
+        
         output = io.StringIO()
-        writer = csv.writer(output)
+        writer = csv.writer(output, delimiter=';')  # Use semicolon for better Excel compatibility
+        
+        # Header section
+        writer.writerow(['=== ОТЧЕТ ПО ПОЛЬЗОВАТЕЛЯМ MessageGuardian ==='])
+        writer.writerow([f'Дата создания: {datetime.now().strftime("%d.%m.%Y %H:%M")}'])
+        writer.writerow([])
+        
+        # Summary section
+        writer.writerow(['=== ОБЩАЯ СТАТИСТИКА ==='])
+        writer.writerow(['Показатель', 'Значение'])
+        writer.writerow(['Всего пользователей', total_users])
+        writer.writerow(['Активных подписок', active_subs])
+        writer.writerow(['Общая прибыль (звезды)', total_revenue])
+        writer.writerow(['Всего платежей', total_payments])
+        writer.writerow(['Средний чек (звезды)', f'{total_revenue/total_payments:.2f}' if total_payments > 0 else '0'])
+        writer.writerow([])
+        
+        # Main data section
+        writer.writerow(['=== ДЕТАЛЬНАЯ ИНФОРМАЦИЯ ПО ПОЛЬЗОВАТЕЛЯМ ==='])
         writer.writerow([
-            "User ID", "Username", "First Name", "Registered", 
-            "Subscription Type", "Active", "End Date", "Total Spent (Stars)", "Payments Count"
+            'User ID', 
+            'Username', 
+            'Имя', 
+            'Дата регистрации', 
+            'Тип подписки', 
+            'Активна', 
+            'Дата окончания', 
+            'Потрачено звезд', 
+            'Кол-во платежей'
         ])
         
         for row in rows:
             writer.writerow([
                 row['user_id'],
-                row['username'] or 'N/A',
-                row['first_name'] or 'N/A',
-                row['registered_at'].strftime('%Y-%m-%d %H:%M') if row['registered_at'] else 'N/A',
-                row['subscription_type'] or 'None',
-                'Yes' if row['is_active'] else 'No',
-                row['end_date'].strftime('%Y-%m-%d') if row['end_date'] else 'N/A',
+                f"@{row['username']}" if row['username'] else 'Нет username',
+                row['first_name'] or 'Без имени',
+                row['registered_at'].strftime('%d.%m.%Y %H:%M') if row['registered_at'] else 'Неизвестно',
+                row['subscription_type'] or 'Нет подписки',
+                'Да' if row['is_active'] else 'Нет',
+                row['end_date'].strftime('%d.%m.%Y') if row['end_date'] else '-',
                 row['total_spent'],
                 row['payments_count']
             ])
+        
+        # Footer section
+        writer.writerow([])
+        writer.writerow(['=== КОНЕЦ ОТЧЕТА ==='])
+        writer.writerow([f'Всего записей: {total_users}'])
         
         return output.getvalue()
 
@@ -384,10 +421,10 @@ async def generate_revenue_chart() -> io.BytesIO:
     
     if not rows:
         # Create empty chart
-        fig, ax = plt.subplots(figsize=(12, 6), facecolor='#1a1a2e')
+        fig, ax = plt.subplots(figsize=(14, 8), facecolor='#1a1a2e')
         ax.set_facecolor('#16213e')
-        ax.text(0.5, 0.5, 'Нет данных за последние 30 дней', 
-                ha='center', va='center', fontsize=16, color='white')
+        ax.text(0.5, 0.5, '📊 Нет данных за последние 30 дней\n\nКогда появятся платежи, здесь будут графики', 
+                ha='center', va='center', fontsize=18, color='white', fontweight='bold')
         ax.set_xticks([])
         ax.set_yticks([])
     else:
@@ -395,17 +432,32 @@ async def generate_revenue_chart() -> io.BytesIO:
         totals = [row['total'] for row in rows]
         counts = [row['count'] for row in rows]
         
+        # Calculate totals for info
+        total_revenue = sum(totals)
+        total_payments = sum(counts)
+        avg_payment = total_revenue / total_payments if total_payments > 0 else 0
+        
         # Create figure with dark theme
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), facecolor='#1a1a2e')
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 12), facecolor='#1a1a2e')
         
         # Revenue chart
         ax1.set_facecolor('#16213e')
-        ax1.bar(dates, totals, color='#ffd700', alpha=0.8, edgecolor='#ffed4e', linewidth=2)
-        ax1.set_title('💰 Прибыль по дням (последние 30 дней)', fontsize=18, color='white', pad=20, fontweight='bold')
-        ax1.set_xlabel('Дата', fontsize=12, color='white')
-        ax1.set_ylabel('Звезды ⭐', fontsize=12, color='white')
-        ax1.tick_params(colors='white')
-        ax1.grid(True, alpha=0.2, color='white')
+        bars = ax1.bar(dates, totals, color='#ffd700', alpha=0.9, edgecolor='#ffed4e', linewidth=2.5)
+        
+        # Add value labels on bars
+        for bar in bars:
+            height = bar.get_height()
+            if height > 0:
+                ax1.text(bar.get_x() + bar.get_width()/2., height,
+                        f'{int(height)}⭐',
+                        ha='center', va='bottom', color='#ffd700', fontsize=11, fontweight='bold')
+        
+        ax1.set_title(f'💰 ПРИБЫЛЬ ПО ДНЯМ (Всего: {total_revenue}⭐ за {len(dates)} дней)', 
+                     fontsize=20, color='#ffd700', pad=25, fontweight='bold')
+        ax1.set_xlabel('Дата', fontsize=14, color='white', fontweight='bold')
+        ax1.set_ylabel('Звезды ⭐', fontsize=14, color='white', fontweight='bold')
+        ax1.tick_params(colors='white', labelsize=11)
+        ax1.grid(True, alpha=0.3, color='white', linestyle='--', linewidth=0.8)
         ax1.spines['bottom'].set_color('white')
         ax1.spines['left'].set_color('white')
         ax1.spines['top'].set_visible(False)
@@ -413,28 +465,39 @@ async def generate_revenue_chart() -> io.BytesIO:
         
         # Payments count chart
         ax2.set_facecolor('#16213e')
-        ax2.plot(dates, counts, color='#00d4ff', marker='o', linewidth=3, markersize=8, markerfacecolor='#00d4ff', markeredgecolor='white', markeredgewidth=2)
-        ax2.fill_between(dates, counts, alpha=0.3, color='#00d4ff')
-        ax2.set_title('💳 Количество платежей по дням', fontsize=18, color='white', pad=20, fontweight='bold')
-        ax2.set_xlabel('Дата', fontsize=12, color='white')
-        ax2.set_ylabel('Платежей', fontsize=12, color='white')
-        ax2.tick_params(colors='white')
-        ax2.grid(True, alpha=0.2, color='white')
+        line = ax2.plot(dates, counts, color='#00d4ff', marker='o', linewidth=4, 
+                       markersize=10, markerfacecolor='#00d4ff', markeredgecolor='white', 
+                       markeredgewidth=2.5, label=f'Платежей: {total_payments}')[0]
+        ax2.fill_between(dates, counts, alpha=0.4, color='#00d4ff')
+        
+        # Add value labels on points
+        for i, (date, count) in enumerate(zip(dates, counts)):
+            if count > 0:
+                ax2.text(date, count, f'{int(count)}',
+                        ha='center', va='bottom', color='#00d4ff', fontsize=11, fontweight='bold')
+        
+        ax2.set_title(f'💳 КОЛИЧЕСТВО ПЛАТЕЖЕЙ (Средний чек: {avg_payment:.1f}⭐)', 
+                     fontsize=20, color='#00d4ff', pad=25, fontweight='bold')
+        ax2.set_xlabel('Дата', fontsize=14, color='white', fontweight='bold')
+        ax2.set_ylabel('Количество платежей', fontsize=14, color='white', fontweight='bold')
+        ax2.tick_params(colors='white', labelsize=11)
+        ax2.grid(True, alpha=0.3, color='white', linestyle='--', linewidth=0.8)
         ax2.spines['bottom'].set_color('white')
         ax2.spines['left'].set_color('white')
         ax2.spines['top'].set_visible(False)
         ax2.spines['right'].set_visible(False)
+        ax2.legend(loc='upper left', fontsize=12, facecolor='#16213e', edgecolor='white', labelcolor='white')
         
         # Format dates
         for ax in [ax1, ax2]:
             ax.xaxis.set_major_formatter(mdates.DateFormatter('%d.%m'))
-            plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
+            plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right', fontsize=11)
     
     plt.tight_layout()
     
     # Save to bytes
     buf = io.BytesIO()
-    plt.savefig(buf, format='png', dpi=150, facecolor='#1a1a2e')
+    plt.savefig(buf, format='png', dpi=150, facecolor='#1a1a2e', bbox_inches='tight')
     buf.seek(0)
     plt.close()
     
@@ -464,8 +527,13 @@ async def generate_users_chart() -> io.BytesIO:
             WHERE is_active = TRUE
             GROUP BY subscription_type
         """)
+        
+        # Get active/inactive counts
+        active = await conn.fetchval("SELECT COUNT(*) FROM subscriptions WHERE is_active = TRUE") or 0
+        total_users = await conn.fetchval("SELECT COUNT(*) FROM users") or 0
+        inactive = total_users - active
     
-    fig = plt.figure(figsize=(14, 10), facecolor='#1a1a2e')
+    fig = plt.figure(figsize=(16, 12), facecolor='#1a1a2e')
     
     # Registration chart
     ax1 = plt.subplot(2, 2, (1, 2))
@@ -474,17 +542,29 @@ async def generate_users_chart() -> io.BytesIO:
     if reg_rows:
         dates = [row['date'] for row in reg_rows]
         counts = [row['count'] for row in reg_rows]
+        total_new = sum(counts)
         
-        ax1.plot(dates, counts, color='#00ff88', marker='o', linewidth=3, markersize=8, markerfacecolor='#00ff88', markeredgecolor='white', markeredgewidth=2)
-        ax1.fill_between(dates, counts, alpha=0.3, color='#00ff88')
+        line = ax1.plot(dates, counts, color='#00ff88', marker='o', linewidth=4, 
+                       markersize=10, markerfacecolor='#00ff88', markeredgecolor='white', 
+                       markeredgewidth=2.5, label=f'Всего новых: {total_new}')[0]
+        ax1.fill_between(dates, counts, alpha=0.4, color='#00ff88')
+        
+        # Add value labels on points
+        for date, count in zip(dates, counts):
+            if count > 0:
+                ax1.text(date, count, f'{int(count)}',
+                        ha='center', va='bottom', color='#00ff88', fontsize=11, fontweight='bold')
+        
         ax1.xaxis.set_major_formatter(mdates.DateFormatter('%d.%m'))
-        plt.setp(ax1.xaxis.get_majorticklabels(), rotation=45, ha='right')
+        plt.setp(ax1.xaxis.get_majorticklabels(), rotation=45, ha='right', fontsize=11)
+        ax1.legend(loc='upper left', fontsize=12, facecolor='#16213e', edgecolor='white', labelcolor='white')
     
-    ax1.set_title('👥 Регистрации пользователей (последние 30 дней)', fontsize=16, color='white', pad=15, fontweight='bold')
-    ax1.set_xlabel('Дата', fontsize=11, color='white')
-    ax1.set_ylabel('Новых пользователей', fontsize=11, color='white')
-    ax1.tick_params(colors='white')
-    ax1.grid(True, alpha=0.2, color='white')
+    ax1.set_title(f'👥 РЕГИСТРАЦИИ ПОЛЬЗОВАТЕЛЕЙ (Всего: {total_users} пользователей)', 
+                 fontsize=18, color='#00ff88', pad=20, fontweight='bold')
+    ax1.set_xlabel('Дата', fontsize=13, color='white', fontweight='bold')
+    ax1.set_ylabel('Новых пользователей', fontsize=13, color='white', fontweight='bold')
+    ax1.tick_params(colors='white', labelsize=11)
+    ax1.grid(True, alpha=0.3, color='white', linestyle='--', linewidth=0.8)
     ax1.spines['bottom'].set_color('white')
     ax1.spines['left'].set_color('white')
     ax1.spines['top'].set_visible(False)
@@ -495,54 +575,61 @@ async def generate_users_chart() -> io.BytesIO:
     ax2.set_facecolor('#16213e')
     
     if sub_rows:
-        labels = [row['subscription_type'] for row in sub_rows]
-        sizes = [row['count'] for row in sub_rows]
+        labels = []
+        sizes = []
+        for row in sub_rows:
+            sub_type = row['subscription_type']
+            count = row['count']
+            labels.append(f"{sub_type}\n({count} чел.)")
+            sizes.append(count)
+        
         colors = ['#ffd700', '#00d4ff', '#ff6b6b', '#4ecdc4', '#95e1d3']
         
         wedges, texts, autotexts = ax2.pie(sizes, labels=labels, autopct='%1.1f%%', 
                                             colors=colors, startangle=90,
-                                            textprops={'color': 'white', 'fontsize': 11, 'fontweight': 'bold'})
+                                            textprops={'color': 'white', 'fontsize': 12, 'fontweight': 'bold'},
+                                            explode=[0.05] * len(sizes))
         for autotext in autotexts:
             autotext.set_color('black')
             autotext.set_fontweight('bold')
+            autotext.set_fontsize(13)
+    else:
+        ax2.text(0.5, 0.5, 'Нет активных\nподписок', 
+                ha='center', va='center', fontsize=14, color='white', fontweight='bold')
     
-    ax2.set_title('📊 Типы подписок', fontsize=14, color='white', pad=10, fontweight='bold')
+    ax2.set_title('📊 ТИПЫ ПОДПИСОК', fontsize=16, color='white', pad=15, fontweight='bold')
     
     # Active vs Inactive users
     ax3 = plt.subplot(2, 2, 4)
     ax3.set_facecolor('#16213e')
     
-    async with db_pool.acquire() as conn:
-        active = await conn.fetchval("SELECT COUNT(*) FROM subscriptions WHERE is_active = TRUE") or 0
-        inactive = await conn.fetchval("SELECT COUNT(*) FROM users") or 0
-        inactive = inactive - active
-    
-    categories = ['Активные\nподписки', 'Без подписки']
+    categories = ['✅ Активные\nподписки', '❌ Без\nподписки']
     values = [active, inactive]
     colors_bar = ['#00ff88', '#ff6b6b']
     
-    bars = ax3.bar(categories, values, color=colors_bar, alpha=0.8, edgecolor='white', linewidth=2)
-    ax3.set_title('✅ Статус пользователей', fontsize=14, color='white', pad=10, fontweight='bold')
-    ax3.set_ylabel('Количество', fontsize=11, color='white')
-    ax3.tick_params(colors='white')
-    ax3.grid(True, alpha=0.2, color='white', axis='y')
+    bars = ax3.bar(categories, values, color=colors_bar, alpha=0.9, edgecolor='white', linewidth=2.5, width=0.6)
+    ax3.set_title('✅ СТАТУС ПОЛЬЗОВАТЕЛЕЙ', fontsize=16, color='white', pad=15, fontweight='bold')
+    ax3.set_ylabel('Количество пользователей', fontsize=13, color='white', fontweight='bold')
+    ax3.tick_params(colors='white', labelsize=11)
+    ax3.grid(True, alpha=0.3, color='white', axis='y', linestyle='--', linewidth=0.8)
     ax3.spines['bottom'].set_color('white')
     ax3.spines['left'].set_color('white')
     ax3.spines['top'].set_visible(False)
     ax3.spines['right'].set_visible(False)
     
-    # Add value labels on bars
-    for bar in bars:
+    # Add value labels on bars with percentage
+    for bar, val in zip(bars, values):
         height = bar.get_height()
+        percentage = (val / total_users * 100) if total_users > 0 else 0
         ax3.text(bar.get_x() + bar.get_width()/2., height,
-                f'{int(height)}',
-                ha='center', va='bottom', color='white', fontsize=12, fontweight='bold')
+                f'{int(height)}\n({percentage:.1f}%)',
+                ha='center', va='bottom', color='white', fontsize=13, fontweight='bold')
     
     plt.tight_layout()
     
     # Save to bytes
     buf = io.BytesIO()
-    plt.savefig(buf, format='png', dpi=150, facecolor='#1a1a2e')
+    plt.savefig(buf, format='png', dpi=150, facecolor='#1a1a2e', bbox_inches='tight')
     buf.seek(0)
     plt.close()
     
@@ -1685,10 +1772,42 @@ async def main() -> None:
             [InlineKeyboardButton(text="❌ Отмена", callback_data="admin_subscriptions")]
         ])
         
+        await state.set_state(AdminStates.waiting_check_user_id)
         await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+        await callback.answer()
+    
+    @dp.message(AdminStates.waiting_check_user_id)
+    async def process_check_user_id(message: Message, state: FSMContext):
+        """Process user ID for check subscription"""
+        if not await is_admin(message.from_user.id):
+            return
         
-        # We'll handle this inline without FSM
-        await callback.answer("Отправьте User ID в чат")
+        try:
+            user_id = int(message.text.strip())
+            sub_status = await check_subscription(user_id)
+            await state.clear()
+            
+            if sub_status['active']:
+                text = (
+                    f"✅ <b>ПОДПИСКА АКТИВНА</b>\n\n"
+                    f"👤 User ID: <code>{user_id}</code>\n"
+                    f"📦 Тип подписки: <b>{sub_status['type']}</b>\n"
+                    f"📅 Осталось дней: <b>{sub_status['days_left']}</b>\n"
+                    f"🗓 Дата окончания: <b>{sub_status['end_date'].strftime('%d.%m.%Y')}</b>\n\n"
+                    f"✨ Подписка действует"
+                )
+            else:
+                text = (
+                    f"❌ <b>ПОДПИСКА НЕАКТИВНА</b>\n\n"
+                    f"👤 User ID: <code>{user_id}</code>\n\n"
+                    f"⚠️ У пользователя нет активной подписки"
+                )
+            
+            await message.answer(text, parse_mode="HTML")
+        except ValueError:
+            await message.answer("❌ Неверный формат. Отправьте числовой User ID.")
+        except Exception as e:
+            await message.answer(f"❌ Ошибка: {e}")
     
     @dp.callback_query(F.data == "admin_export_csv")
     async def callback_admin_export_csv(callback: CallbackQuery):
