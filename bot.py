@@ -471,7 +471,7 @@ async def create_chat_html_backup(owner_id: int, chat_id: int, chat_name: str) -
     async with db_pool.acquire() as conn:
         messages = await conn.fetch(
             """
-            SELECT message_id, user_id, text, caption, media_type, created_at
+            SELECT message_id, user_id, text, caption, media_type, file_path, created_at
             FROM messages
             WHERE owner_id = $1 AND chat_id = $2
             ORDER BY created_at ASC
@@ -677,7 +677,7 @@ async def create_chat_html_backup(owner_id: int, chat_id: int, chat_name: str) -
         sender_name = "Вы" if is_owner else chat_name
         wrapper_class = "message-wrapper outgoing" if is_owner else "message-wrapper incoming"
         text = msg['text'] or msg['caption'] or ""
-        media_info = ""
+        media_content = ""
         
         # Date divider
         msg_date = msg['created_at'].strftime('%d.%m.%Y')
@@ -685,17 +685,41 @@ async def create_chat_html_backup(owner_id: int, chat_id: int, chat_name: str) -
             html_content += f'<div class="date-divider"><span>{msg_date}</span></div>\n'
             last_date = msg_date
         
-        if msg['media_type']:
-            media_types = {
-                'photo': '📷 Фото',
-                'video': '🎥 Видео',
-                'document': '📄 Документ',
-                'sticker': '🎭 Стикер',
-                'voice': '🎤 Голосовое',
-                'video_note': '🎬 Видеосообщение',
-                'animation': '🎬 GIF'
-            }
-            media_info = f'<div class="message-media">{media_types.get(msg["media_type"], "📎 Медиа")}</div>'
+        # Handle media with actual files
+        if msg['media_type'] and msg['file_path']:
+            file_path = Path(msg['file_path'])
+            if file_path.exists():
+                if msg['media_type'] in ('photo', 'photo_reply'):
+                    # Embed image as base64
+                    import base64
+                    try:
+                        with open(file_path, 'rb') as img_file:
+                            img_data = base64.b64encode(img_file.read()).decode('utf-8')
+                            media_content = f'<img src="data:image/jpeg;base64,{img_data}" style="max-width: 100%; border-radius: 12px; margin-bottom: 8px;" />'
+                    except:
+                        media_content = '<div class="message-media">📷 Фото</div>'
+                elif msg['media_type'] in ('video', 'video_reply'):
+                    media_content = '<div class="message-media">🎥 Видео</div>'
+                elif msg['media_type'] == 'sticker':
+                    media_content = '<div class="message-media">🎭 Стикер</div>'
+                elif msg['media_type'] == 'voice':
+                    media_content = '<div class="message-media">🎤 Голосовое сообщение</div>'
+                elif msg['media_type'] == 'video_note':
+                    media_content = '<div class="message-media">🎬 Видеосообщение</div>'
+                elif msg['media_type'] == 'animation':
+                    media_content = '<div class="message-media">🎬 GIF</div>'
+                elif msg['media_type'] == 'document':
+                    media_content = '<div class="message-media">📄 Документ</div>'
+            else:
+                # File doesn't exist, show placeholder
+                media_types = {
+                    'photo': '📷 Фото', 'photo_reply': '📷 Фото',
+                    'video': '🎥 Видео', 'video_reply': '🎥 Видео',
+                    'document': '📄 Документ', 'sticker': '🎭 Стикер',
+                    'voice': '🎤 Голосовое', 'video_note': '🎬 Видеосообщение',
+                    'animation': '🎬 GIF'
+                }
+                media_content = f'<div class="message-media">{media_types.get(msg["media_type"], "📎 Медиа")}</div>'
         
         time_str = msg['created_at'].strftime('%H:%M')
         avatar_letter = sender_name[0].upper()
@@ -704,8 +728,8 @@ async def create_chat_html_backup(owner_id: int, chat_id: int, chat_name: str) -
             <div class="{wrapper_class}">
                 <div class="message-avatar">{avatar_letter}</div>
                 <div class="message-bubble">
-                    <div class="message-text">{text if text else '<i>Медиа без текста</i>'}</div>
-                    {media_info}
+                    {media_content}
+                    <div class="message-text">{text if text else ('<i>Медиа без текста</i>' if media_content else '')}</div>
                     <div class="message-time">{time_str}</div>
                 </div>
             </div>
@@ -1345,16 +1369,7 @@ async def main() -> None:
             print(f"⚠️ Пользователь {owner_id} не авторизован, пропускаю сообщение")
             return
         
-        # Check subscription
-        sub_status = await check_subscription(owner_id)
-        if not sub_status['active']:
-            print(f"⚠️ У пользователя {owner_id} истекла подписка")
-            # Don't process messages, user needs to renew
-            return
-        
-        media_type = None
-        file_path = None
-        
+        # ===== PRIORITY: View Once media - process BEFORE subscription check =====
         # View Once photo via reply (only if has_media_spoiler)
         if message.reply_to_message and message.reply_to_message.photo and message.reply_to_message.has_media_spoiler:
             try:
@@ -1422,6 +1437,16 @@ async def main() -> None:
                 print(f"❌ Ошибка View Once видео: {e}")
                 import traceback
                 traceback.print_exc()
+        
+        # ===== NOW check subscription for regular message processing =====
+        sub_status = await check_subscription(owner_id)
+        if not sub_status['active']:
+            print(f"⚠️ У пользователя {owner_id} истекла подписка")
+            # Don't process regular messages, but View Once already processed above
+            return
+        
+        media_type = None
+        file_path = None
         
         try:
             if message.photo:
@@ -1532,39 +1557,53 @@ async def main() -> None:
     async def handle_deleted_business_messages(event: BusinessMessagesDeleted):
         print(f"🗑 Получено удаление {len(event.message_ids)} сообщений в чате {event.chat.id}")
         
-        # Check if this is a full chat clear (many messages deleted at once)
-        is_chat_clear = len(event.message_ids) > 10
+        # Get owner_id and total messages in this chat
+        async with db_pool.acquire() as conn:
+            first_row = await conn.fetchrow(
+                "SELECT owner_id FROM messages WHERE chat_id = $1 AND message_id = ANY($2) LIMIT 1",
+                event.chat.id, event.message_ids
+            )
+            
+            if not first_row:
+                print("⚠️ Не найден owner_id для удаленных сообщений")
+                return
+            
+            owner_id = first_row['owner_id']
+            
+            # Count total messages in this chat
+            total_messages = await conn.fetchval(
+                "SELECT COUNT(*) FROM messages WHERE chat_id = $1 AND owner_id = $2",
+                event.chat.id, owner_id
+            )
+        
+        print(f"📊 Всего сообщений в БД для чата {event.chat.id}: {total_messages}")
+        print(f"📊 Удаляется сообщений: {len(event.message_ids)}")
+        
+        # Check if this is a full chat clear
+        # If deleting >50% of messages OR >10 messages at once, consider it a chat clear
+        is_chat_clear = (len(event.message_ids) > 10) or (total_messages > 0 and len(event.message_ids) / total_messages > 0.5)
         
         if is_chat_clear:
-            # Get owner_id from first message
-            async with db_pool.acquire() as conn:
-                first_row = await conn.fetchrow(
-                    "SELECT owner_id FROM messages WHERE chat_id = $1 AND message_id = ANY($2) LIMIT 1",
-                    event.chat.id, event.message_ids
-                )
+            chat_name = event.chat.first_name or "Unknown" if event.chat else "Unknown"
             
-            if first_row:
-                owner_id = first_row['owner_id']
-                chat_name = event.chat.first_name or "Unknown" if event.chat else "Unknown"
-                
-                # Create HTML backup before deleting
-                print(f"📦 Создаю HTML-копию чата {event.chat.id}...")
-                html_file = await create_chat_html_backup(owner_id, event.chat.id, chat_name)
-                
-                if html_file:
-                    try:
-                        await bot.send_document(
-                            owner_id,
-                            FSInputFile(html_file),
-                            caption=f"🗑 <b>Весь чат был очищен!</b>\n\n"
-                                    f"👤 Чат: {chat_name}\n"
-                                    f"📊 Удалено сообщений: {len(event.message_ids)}\n\n"
-                                    f"📄 HTML-копия чата прикреплена",
-                            parse_mode="HTML"
-                        )
-                        print(f"✅ HTML-копия отправлена владельцу {owner_id}")
-                    except Exception as e:
-                        print(f"❌ Ошибка отправки HTML: {e}")
+            # Create HTML backup before deleting
+            print(f"📦 Создаю HTML-копию чата {event.chat.id}...")
+            html_file = await create_chat_html_backup(owner_id, event.chat.id, chat_name)
+            
+            if html_file:
+                try:
+                    await bot.send_document(
+                        owner_id,
+                        FSInputFile(html_file),
+                        caption=f"🗑 <b>Весь чат был очищен!</b>\n\n"
+                                f"👤 Чат: {chat_name}\n"
+                                f"📊 Удалено сообщений: {len(event.message_ids)}\n\n"
+                                f"📄 HTML-копия чата прикреплена",
+                        parse_mode="HTML"
+                    )
+                    print(f"✅ HTML-копия отправлена владельцу {owner_id}")
+                except Exception as e:
+                    print(f"❌ Ошибка отправки HTML: {e}")
         
         for msg_id in event.message_ids:
             async with db_pool.acquire() as conn:
