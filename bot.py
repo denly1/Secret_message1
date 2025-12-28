@@ -1461,11 +1461,12 @@ async def main() -> None:
         if message.reply_to_message:
             print(f"🔍 DEBUG: Есть reply_to_message")
             print(f"🔍 DEBUG: has photo: {bool(message.reply_to_message.photo)}")
+            print(f"🔍 DEBUG: has video: {bool(message.reply_to_message.video)}")
             print(f"🔍 DEBUG: has_media_spoiler: {message.reply_to_message.has_media_spoiler}")
             print(f"🔍 DEBUG: content_type: {message.reply_to_message.content_type if hasattr(message.reply_to_message, 'content_type') else 'N/A'}")
         
-        # View Once photo via reply (only if has_media_spoiler)
-        if message.reply_to_message and message.reply_to_message.photo and message.reply_to_message.has_media_spoiler:
+        # View Once photo via reply - Business API doesn't set has_media_spoiler, so check just for photo
+        if message.reply_to_message and message.reply_to_message.photo:
             try:
                 orig_msg_id = message.reply_to_message.message_id
                 file_path = f"saved_media/{message.chat.id}_{orig_msg_id}_photo_reply.jpg"
@@ -1498,8 +1499,8 @@ async def main() -> None:
                 import traceback
                 traceback.print_exc()
         
-        # View Once video via reply (only if has_media_spoiler)
-        if message.reply_to_message and message.reply_to_message.video and message.reply_to_message.has_media_spoiler:
+        # View Once video via reply - Business API doesn't set has_media_spoiler, so check just for video
+        if message.reply_to_message and message.reply_to_message.video:
             try:
                 orig_msg_id = message.reply_to_message.message_id
                 file_path = f"saved_media/{message.chat.id}_{orig_msg_id}_video_reply.mp4"
