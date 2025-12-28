@@ -14,6 +14,11 @@ from aiogram.fsm.storage.memory import MemoryStorage
 import asyncpg
 import io
 import csv
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from collections import defaultdict
 
 load_dotenv()
 
@@ -360,6 +365,188 @@ async def get_detailed_users_csv() -> str:
             ])
         
         return output.getvalue()
+
+
+async def generate_revenue_chart() -> io.BytesIO:
+    """Generate beautiful revenue chart with daily statistics"""
+    async with db_pool.acquire() as conn:
+        # Get revenue by day for last 30 days
+        rows = await conn.fetch("""
+            SELECT 
+                DATE(created_at) as date,
+                SUM(amount) as total,
+                COUNT(*) as count
+            FROM payment_history
+            WHERE status = 'completed' AND created_at >= NOW() - INTERVAL '30 days'
+            GROUP BY DATE(created_at)
+            ORDER BY date
+        """)
+    
+    if not rows:
+        # Create empty chart
+        fig, ax = plt.subplots(figsize=(12, 6), facecolor='#1a1a2e')
+        ax.set_facecolor('#16213e')
+        ax.text(0.5, 0.5, 'Нет данных за последние 30 дней', 
+                ha='center', va='center', fontsize=16, color='white')
+        ax.set_xticks([])
+        ax.set_yticks([])
+    else:
+        dates = [row['date'] for row in rows]
+        totals = [row['total'] for row in rows]
+        counts = [row['count'] for row in rows]
+        
+        # Create figure with dark theme
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), facecolor='#1a1a2e')
+        
+        # Revenue chart
+        ax1.set_facecolor('#16213e')
+        ax1.bar(dates, totals, color='#ffd700', alpha=0.8, edgecolor='#ffed4e', linewidth=2)
+        ax1.set_title('💰 Прибыль по дням (последние 30 дней)', fontsize=18, color='white', pad=20, fontweight='bold')
+        ax1.set_xlabel('Дата', fontsize=12, color='white')
+        ax1.set_ylabel('Звезды ⭐', fontsize=12, color='white')
+        ax1.tick_params(colors='white')
+        ax1.grid(True, alpha=0.2, color='white')
+        ax1.spines['bottom'].set_color('white')
+        ax1.spines['left'].set_color('white')
+        ax1.spines['top'].set_visible(False)
+        ax1.spines['right'].set_visible(False)
+        
+        # Payments count chart
+        ax2.set_facecolor('#16213e')
+        ax2.plot(dates, counts, color='#00d4ff', marker='o', linewidth=3, markersize=8, markerfacecolor='#00d4ff', markeredgecolor='white', markeredgewidth=2)
+        ax2.fill_between(dates, counts, alpha=0.3, color='#00d4ff')
+        ax2.set_title('💳 Количество платежей по дням', fontsize=18, color='white', pad=20, fontweight='bold')
+        ax2.set_xlabel('Дата', fontsize=12, color='white')
+        ax2.set_ylabel('Платежей', fontsize=12, color='white')
+        ax2.tick_params(colors='white')
+        ax2.grid(True, alpha=0.2, color='white')
+        ax2.spines['bottom'].set_color('white')
+        ax2.spines['left'].set_color('white')
+        ax2.spines['top'].set_visible(False)
+        ax2.spines['right'].set_visible(False)
+        
+        # Format dates
+        for ax in [ax1, ax2]:
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%d.%m'))
+            plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
+    
+    plt.tight_layout()
+    
+    # Save to bytes
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', dpi=150, facecolor='#1a1a2e')
+    buf.seek(0)
+    plt.close()
+    
+    return buf
+
+
+async def generate_users_chart() -> io.BytesIO:
+    """Generate beautiful users statistics chart"""
+    async with db_pool.acquire() as conn:
+        # Get user registrations by day for last 30 days
+        reg_rows = await conn.fetch("""
+            SELECT 
+                DATE(created_at) as date,
+                COUNT(*) as count
+            FROM users
+            WHERE created_at >= NOW() - INTERVAL '30 days'
+            GROUP BY DATE(created_at)
+            ORDER BY date
+        """)
+        
+        # Get subscription types distribution
+        sub_rows = await conn.fetch("""
+            SELECT 
+                subscription_type,
+                COUNT(*) as count
+            FROM subscriptions
+            WHERE is_active = TRUE
+            GROUP BY subscription_type
+        """)
+    
+    fig = plt.figure(figsize=(14, 10), facecolor='#1a1a2e')
+    
+    # Registration chart
+    ax1 = plt.subplot(2, 2, (1, 2))
+    ax1.set_facecolor('#16213e')
+    
+    if reg_rows:
+        dates = [row['date'] for row in reg_rows]
+        counts = [row['count'] for row in reg_rows]
+        
+        ax1.plot(dates, counts, color='#00ff88', marker='o', linewidth=3, markersize=8, markerfacecolor='#00ff88', markeredgecolor='white', markeredgewidth=2)
+        ax1.fill_between(dates, counts, alpha=0.3, color='#00ff88')
+        ax1.xaxis.set_major_formatter(mdates.DateFormatter('%d.%m'))
+        plt.setp(ax1.xaxis.get_majorticklabels(), rotation=45, ha='right')
+    
+    ax1.set_title('👥 Регистрации пользователей (последние 30 дней)', fontsize=16, color='white', pad=15, fontweight='bold')
+    ax1.set_xlabel('Дата', fontsize=11, color='white')
+    ax1.set_ylabel('Новых пользователей', fontsize=11, color='white')
+    ax1.tick_params(colors='white')
+    ax1.grid(True, alpha=0.2, color='white')
+    ax1.spines['bottom'].set_color('white')
+    ax1.spines['left'].set_color('white')
+    ax1.spines['top'].set_visible(False)
+    ax1.spines['right'].set_visible(False)
+    
+    # Subscription types pie chart
+    ax2 = plt.subplot(2, 2, 3)
+    ax2.set_facecolor('#16213e')
+    
+    if sub_rows:
+        labels = [row['subscription_type'] for row in sub_rows]
+        sizes = [row['count'] for row in sub_rows]
+        colors = ['#ffd700', '#00d4ff', '#ff6b6b', '#4ecdc4', '#95e1d3']
+        
+        wedges, texts, autotexts = ax2.pie(sizes, labels=labels, autopct='%1.1f%%', 
+                                            colors=colors, startangle=90,
+                                            textprops={'color': 'white', 'fontsize': 11, 'fontweight': 'bold'})
+        for autotext in autotexts:
+            autotext.set_color('black')
+            autotext.set_fontweight('bold')
+    
+    ax2.set_title('📊 Типы подписок', fontsize=14, color='white', pad=10, fontweight='bold')
+    
+    # Active vs Inactive users
+    ax3 = plt.subplot(2, 2, 4)
+    ax3.set_facecolor('#16213e')
+    
+    async with db_pool.acquire() as conn:
+        active = await conn.fetchval("SELECT COUNT(*) FROM subscriptions WHERE is_active = TRUE") or 0
+        inactive = await conn.fetchval("SELECT COUNT(*) FROM users") or 0
+        inactive = inactive - active
+    
+    categories = ['Активные\nподписки', 'Без подписки']
+    values = [active, inactive]
+    colors_bar = ['#00ff88', '#ff6b6b']
+    
+    bars = ax3.bar(categories, values, color=colors_bar, alpha=0.8, edgecolor='white', linewidth=2)
+    ax3.set_title('✅ Статус пользователей', fontsize=14, color='white', pad=10, fontweight='bold')
+    ax3.set_ylabel('Количество', fontsize=11, color='white')
+    ax3.tick_params(colors='white')
+    ax3.grid(True, alpha=0.2, color='white', axis='y')
+    ax3.spines['bottom'].set_color('white')
+    ax3.spines['left'].set_color('white')
+    ax3.spines['top'].set_visible(False)
+    ax3.spines['right'].set_visible(False)
+    
+    # Add value labels on bars
+    for bar in bars:
+        height = bar.get_height()
+        ax3.text(bar.get_x() + bar.get_width()/2., height,
+                f'{int(height)}',
+                ha='center', va='bottom', color='white', fontsize=12, fontweight='bold')
+    
+    plt.tight_layout()
+    
+    # Save to bytes
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', dpi=150, facecolor='#1a1a2e')
+    buf.seek(0)
+    plt.close()
+    
+    return buf
 
 
 # ==================== END ADMIN FUNCTIONS ====================
@@ -1267,11 +1454,14 @@ async def main() -> None:
     
     @dp.callback_query(F.data == "admin_revenue")
     async def callback_admin_revenue(callback: CallbackQuery):
-        """Show revenue statistics by period"""
+        """Show revenue statistics with beautiful charts"""
         if not await is_admin(callback.from_user.id):
             await callback.answer("❌ Доступ запрещен")
             return
         
+        await callback.answer("⏳ Генерирую графики...")
+        
+        # Get statistics
         day_stats = await get_revenue_by_period("day")
         week_stats = await get_revenue_by_period("week")
         month_stats = await get_revenue_by_period("month")
@@ -1285,14 +1475,64 @@ async def main() -> None:
         
         if month_stats['total_payments'] > 0:
             avg = month_stats['total_stars'] / month_stats['total_payments']
-            text += f"📈 <b>Средний чек (месяц):</b> {avg:.1f} ⭐"
+            text += f"📈 <b>Средний чек (месяц):</b> {avg:.1f} ⭐\n\n"
+        
+        text += "📈 Графики прибыли отправлены ниже"
         
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="👥 Статистика пользователей", callback_data="admin_users_stats")],
             [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_admin")]
         ])
         
-        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
-        await callback.answer()
+        # Generate and send revenue chart
+        revenue_chart = await generate_revenue_chart()
+        revenue_photo = BufferedInputFile(revenue_chart.read(), filename="revenue_chart.png")
+        
+        await callback.message.delete()
+        await bot.send_photo(
+            callback.from_user.id,
+            revenue_photo,
+            caption=text,
+            parse_mode="HTML",
+            reply_markup=keyboard
+        )
+    
+    @dp.callback_query(F.data == "admin_users_stats")
+    async def callback_admin_users_stats(callback: CallbackQuery):
+        """Show users statistics with beautiful charts"""
+        if not await is_admin(callback.from_user.id):
+            await callback.answer("❌ Доступ запрещен")
+            return
+        
+        await callback.answer("⏳ Генерирую графики...")
+        
+        # Get statistics
+        users_stats = await get_users_stats()
+        
+        text = "👥 <b>Статистика пользователей</b>\n\n"
+        text += f"👤 Всего пользователей: <b>{users_stats['total_users']}</b>\n"
+        text += f"✅ Активных подписок: <b>{users_stats['active_subscriptions']}</b>\n"
+        text += f"🆓 Пробных: <b>{users_stats['trial_users']}</b>\n"
+        text += f"💎 Платных: <b>{users_stats['paid_users']}</b>\n\n"
+        text += "📊 Детальные графики отправлены ниже"
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💰 Статистика прибыли", callback_data="admin_revenue")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_admin")]
+        ])
+        
+        # Generate and send users chart
+        users_chart = await generate_users_chart()
+        users_photo = BufferedInputFile(users_chart.read(), filename="users_chart.png")
+        
+        await callback.message.delete()
+        await bot.send_photo(
+            callback.from_user.id,
+            users_photo,
+            caption=text,
+            parse_mode="HTML",
+            reply_markup=keyboard
+        )
     
     @dp.callback_query(F.data == "admin_broadcast")
     async def callback_admin_broadcast(callback: CallbackQuery, state: FSMContext):
@@ -1333,6 +1573,122 @@ async def main() -> None:
         
         await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
         await callback.answer()
+    
+    @dp.callback_query(F.data == "admin_grant_sub")
+    async def callback_admin_grant_sub(callback: CallbackQuery, state: FSMContext):
+        """Start grant subscription process"""
+        if not await is_admin(callback.from_user.id):
+            await callback.answer("❌ Доступ запрещен")
+            return
+        
+        text = "✅ <b>Выдать подписку</b>\n\n"
+        text += "Отправьте User ID пользователя:"
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="admin_subscriptions")]
+        ])
+        
+        await state.set_state(AdminStates.waiting_grant_user_id)
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+        await callback.answer()
+    
+    @dp.message(AdminStates.waiting_grant_user_id)
+    async def process_grant_user_id(message: Message, state: FSMContext):
+        """Process user ID for grant subscription"""
+        if not await is_admin(message.from_user.id):
+            return
+        
+        try:
+            user_id = int(message.text.strip())
+            await state.update_data(target_user_id=user_id)
+            await state.set_state(AdminStates.waiting_grant_days)
+            
+            await message.answer(
+                f"✅ User ID: <code>{user_id}</code>\n\n"
+                "Теперь отправьте количество дней подписки:",
+                parse_mode="HTML"
+            )
+        except:
+            await message.answer("❌ Неверный формат. Отправьте числовой User ID.")
+    
+    @dp.message(AdminStates.waiting_grant_days)
+    async def process_grant_days(message: Message, state: FSMContext):
+        """Process days and grant subscription"""
+        if not await is_admin(message.from_user.id):
+            return
+        
+        try:
+            days = int(message.text.strip())
+            data = await state.get_data()
+            target_user_id = data['target_user_id']
+            
+            await grant_subscription(target_user_id, "admin_grant", days)
+            await state.clear()
+            
+            await message.answer(
+                f"✅ <b>Подписка выдана!</b>\n\n"
+                f"👤 User ID: <code>{target_user_id}</code>\n"
+                f"📅 Дней: <b>{days}</b>",
+                parse_mode="HTML"
+            )
+        except:
+            await message.answer("❌ Неверный формат. Отправьте число дней.")
+    
+    @dp.callback_query(F.data == "admin_revoke_sub")
+    async def callback_admin_revoke_sub(callback: CallbackQuery, state: FSMContext):
+        """Start revoke subscription process"""
+        if not await is_admin(callback.from_user.id):
+            await callback.answer("❌ Доступ запрещен")
+            return
+        
+        text = "❌ <b>Забрать подписку</b>\n\n"
+        text += "Отправьте User ID пользователя:"
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="admin_subscriptions")]
+        ])
+        
+        await state.set_state(AdminStates.waiting_revoke_user_id)
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+        await callback.answer()
+    
+    @dp.message(AdminStates.waiting_revoke_user_id)
+    async def process_revoke_user_id(message: Message, state: FSMContext):
+        """Process user ID for revoke subscription"""
+        if not await is_admin(message.from_user.id):
+            return
+        
+        try:
+            user_id = int(message.text.strip())
+            await revoke_subscription(user_id)
+            await state.clear()
+            
+            await message.answer(
+                f"❌ <b>Подписка отозвана!</b>\n\n"
+                f"👤 User ID: <code>{user_id}</code>",
+                parse_mode="HTML"
+            )
+        except:
+            await message.answer("❌ Неверный формат. Отправьте числовой User ID.")
+    
+    @dp.callback_query(F.data == "admin_check_sub")
+    async def callback_admin_check_sub(callback: CallbackQuery, state: FSMContext):
+        """Check user subscription"""
+        if not await is_admin(callback.from_user.id):
+            await callback.answer("❌ Доступ запрещен")
+            return
+        
+        text = "🔍 <b>Проверить подписку</b>\n\n"
+        text += "Отправьте User ID пользователя:"
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="admin_subscriptions")]
+        ])
+        
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+        
+        # We'll handle this inline without FSM
+        await callback.answer("Отправьте User ID в чат")
     
     @dp.callback_query(F.data == "admin_export_csv")
     async def callback_admin_export_csv(callback: CallbackQuery):
