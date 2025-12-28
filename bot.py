@@ -5,10 +5,15 @@ from typing import Optional
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, BusinessMessagesDeleted, FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice, PreCheckoutQuery
+from aiogram.types import Message, BusinessMessagesDeleted, FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice, PreCheckoutQuery, CallbackQuery, BufferedInputFile
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
 import asyncpg
+import io
+import csv
 
 load_dotenv()
 
@@ -29,18 +34,30 @@ DB_PASSWORD = os.getenv("DB_PASSWORD", "1")
 # Global database pool
 db_pool = None
 
+# Track recent deletions for chat clear detection
+recent_deletions = {}  # {chat_id: [(timestamp, count), ...]}
+
+# FSM States for admin panel
+class AdminStates(StatesGroup):
+    waiting_broadcast_content = State()
+    waiting_broadcast_confirm = State()
+    waiting_grant_user_id = State()
+    waiting_grant_days = State()
+    waiting_revoke_user_id = State()
+
 
 async def init_db():
     """Initialize database connection pool"""
     global db_pool
+    # Increased pool size for scalability (15000+ users)
     db_pool = await asyncpg.create_pool(
         host=DB_HOST,
         port=DB_PORT,
         database=DB_NAME,
         user=DB_USER,
         password=DB_PASSWORD,
-        min_size=5,
-        max_size=20
+        min_size=10,  # Minimum connections
+        max_size=50   # Maximum connections for high load
     )
     print("✅ PostgreSQL connection pool created")
     
@@ -252,6 +269,97 @@ async def get_revenue_stats() -> dict:
         ) or 0
         
         return {"total_stars": total, "total_payments": count}
+
+
+async def get_revenue_by_period(period: str) -> dict:
+    """Get revenue statistics by period (day/week/month/year)"""
+    async with db_pool.acquire() as conn:
+        if period == "day":
+            date_filter = "created_at >= NOW() - INTERVAL '1 day'"
+        elif period == "week":
+            date_filter = "created_at >= NOW() - INTERVAL '7 days'"
+        elif period == "month":
+            date_filter = "created_at >= NOW() - INTERVAL '30 days'"
+        elif period == "year":
+            date_filter = "created_at >= NOW() - INTERVAL '365 days'"
+        else:
+            date_filter = "TRUE"
+        
+        total = await conn.fetchval(
+            f"SELECT COALESCE(SUM(amount), 0) FROM payment_history WHERE status = 'completed' AND {date_filter}"
+        ) or 0
+        
+        count = await conn.fetchval(
+            f"SELECT COUNT(*) FROM payment_history WHERE status = 'completed' AND {date_filter}"
+        ) or 0
+        
+        return {"total_stars": total, "total_payments": count, "period": period}
+
+
+async def get_users_stats() -> dict:
+    """Get detailed users statistics"""
+    async with db_pool.acquire() as conn:
+        total_users = await conn.fetchval("SELECT COUNT(*) FROM users") or 0
+        active_subs = await conn.fetchval(
+            "SELECT COUNT(*) FROM subscriptions WHERE is_active = TRUE"
+        ) or 0
+        trial_users = await conn.fetchval(
+            "SELECT COUNT(*) FROM subscriptions WHERE subscription_type = 'trial' AND is_active = TRUE"
+        ) or 0
+        paid_users = await conn.fetchval(
+            "SELECT COUNT(*) FROM subscriptions WHERE subscription_type != 'trial' AND is_active = TRUE"
+        ) or 0
+        
+        return {
+            "total_users": total_users,
+            "active_subscriptions": active_subs,
+            "trial_users": trial_users,
+            "paid_users": paid_users
+        }
+
+
+async def get_detailed_users_csv() -> str:
+    """Generate detailed CSV with user statistics"""
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT 
+                u.user_id,
+                u.username,
+                u.first_name,
+                u.created_at as registered_at,
+                s.subscription_type,
+                s.is_active,
+                s.end_date,
+                COALESCE(SUM(ph.amount), 0) as total_spent,
+                COUNT(ph.id) as payments_count
+            FROM users u
+            LEFT JOIN subscriptions s ON u.user_id = s.user_id
+            LEFT JOIN payment_history ph ON u.user_id = ph.user_id AND ph.status = 'completed'
+            GROUP BY u.user_id, u.username, u.first_name, u.created_at, s.subscription_type, s.is_active, s.end_date
+            ORDER BY total_spent DESC, u.created_at DESC
+        """)
+        
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow([
+            "User ID", "Username", "First Name", "Registered", 
+            "Subscription Type", "Active", "End Date", "Total Spent (Stars)", "Payments Count"
+        ])
+        
+        for row in rows:
+            writer.writerow([
+                row['user_id'],
+                row['username'] or 'N/A',
+                row['first_name'] or 'N/A',
+                row['registered_at'].strftime('%Y-%m-%d %H:%M') if row['registered_at'] else 'N/A',
+                row['subscription_type'] or 'None',
+                'Yes' if row['is_active'] else 'No',
+                row['end_date'].strftime('%Y-%m-%d') if row['end_date'] else 'N/A',
+                row['total_spent'],
+                row['payments_count']
+            ])
+        
+        return output.getvalue()
 
 
 # ==================== END ADMIN FUNCTIONS ====================
@@ -814,7 +922,8 @@ async def main() -> None:
     
     await init_db()
     bot = Bot(token=bot_token)
-    dp = Dispatcher()
+    storage = MemoryStorage()
+    dp = Dispatcher(storage=storage)
 
     @dp.message(Command("start"))
     async def cmd_start(message: Message):
@@ -974,34 +1083,32 @@ async def main() -> None:
         is_super = await is_super_admin(user_id)
         
         # Get stats
-        users = await get_all_users()
+        users_stats = await get_users_stats()
         revenue = await get_revenue_stats()
-        active_subs = 0
-        async with db_pool.acquire() as conn:
-            active_subs = await conn.fetchval(
-                "SELECT COUNT(*) FROM subscriptions WHERE is_active = TRUE"
-            )
         
         text = "👮 <b>Админ-панель MessageGuardian</b>\n\n"
-        text += f"👥 Пользователей: <b>{len(users)}</b>\n"
-        text += f"✅ Активных подписок: <b>{active_subs}</b>\n"
-        text += f"💰 Прибыль: <b>{revenue['total_stars']} ⭐</b>\n"
-        text += f"💳 Платежей: <b>{revenue['total_payments']}</b>\n\n"
+        text += f"👥 Всего пользователей: <b>{users_stats['total_users']}</b>\n"
+        text += f"✅ Активных подписок: <b>{users_stats['active_subscriptions']}</b>\n"
+        text += f"🆓 Пробных: <b>{users_stats['trial_users']}</b>\n"
+        text += f"� Платных: <b>{users_stats['paid_users']}</b>\n\n"
+        text += f"� Общая прибыль: <b>{revenue['total_stars']} ⭐</b>\n"
+        text += f"💳 Всего платежей: <b>{revenue['total_payments']}</b>\n\n"
+        text += "Выберите действие:"
         
-        text += "<b>📝 Команды:</b>\n"
-        text += "<code>/grant USER_ID DAYS</code> - выдать подписку\n"
-        text += "<code>/revoke USER_ID</code> - забрать подписку\n"
-        text += "<code>/check USER_ID</code> - проверить подписку\n"
-        text += "<code>/users</code> - выгрузить пользователей в CSV\n"
-        text += "<code>/broadcast</code> + ответ на сообщение - рассылка\n\n"
+        # Build keyboard with buttons
+        keyboard_buttons = [
+            [InlineKeyboardButton(text="📊 Статистика прибыли", callback_data="admin_revenue")],
+            [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
+            [InlineKeyboardButton(text="👥 Управление подписками", callback_data="admin_subscriptions")],
+            [InlineKeyboardButton(text="📥 Выгрузить CSV", callback_data="admin_export_csv")]
+        ]
         
         if is_super:
-            text += "<b>� Команды супер-админа:</b>\n"
-            text += "<code>/addadmin USER_ID</code> - добавить админа\n"
-            text += "<code>/deladmin USER_ID</code> - удалить админа\n"
-            text += "<code>/admins</code> - список админов\n"
+            keyboard_buttons.append([InlineKeyboardButton(text="👑 Управление админами", callback_data="admin_manage_admins")])
         
-        await message.answer(text, parse_mode="HTML")
+        keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
+        
+        await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
     
     # ==================== SUBSCRIPTION CALLBACKS ====================
     
@@ -1155,6 +1262,205 @@ async def main() -> None:
                 f"🎉 Спасибо за поддержку!",
                 parse_mode="HTML"
             )
+    
+    # ==================== ADMIN PANEL CALLBACKS ====================
+    
+    @dp.callback_query(F.data == "admin_revenue")
+    async def callback_admin_revenue(callback: CallbackQuery):
+        """Show revenue statistics by period"""
+        if not await is_admin(callback.from_user.id):
+            await callback.answer("❌ Доступ запрещен")
+            return
+        
+        day_stats = await get_revenue_by_period("day")
+        week_stats = await get_revenue_by_period("week")
+        month_stats = await get_revenue_by_period("month")
+        year_stats = await get_revenue_by_period("year")
+        
+        text = "📊 <b>Статистика прибыли</b>\n\n"
+        text += f"📅 <b>За день:</b> {day_stats['total_stars']} ⭐ ({day_stats['total_payments']} платежей)\n"
+        text += f"📅 <b>За неделю:</b> {week_stats['total_stars']} ⭐ ({week_stats['total_payments']} платежей)\n"
+        text += f"📅 <b>За месяц:</b> {month_stats['total_stars']} ⭐ ({month_stats['total_payments']} платежей)\n"
+        text += f"📅 <b>За год:</b> {year_stats['total_stars']} ⭐ ({year_stats['total_payments']} платежей)\n\n"
+        
+        if month_stats['total_payments'] > 0:
+            avg = month_stats['total_stars'] / month_stats['total_payments']
+            text += f"📈 <b>Средний чек (месяц):</b> {avg:.1f} ⭐"
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_admin")]
+        ])
+        
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+        await callback.answer()
+    
+    @dp.callback_query(F.data == "admin_broadcast")
+    async def callback_admin_broadcast(callback: CallbackQuery, state: FSMContext):
+        """Start broadcast process"""
+        if not await is_admin(callback.from_user.id):
+            await callback.answer("❌ Доступ запрещен")
+            return
+        
+        text = "📢 <b>Рассылка сообщений</b>\n\n"
+        text += "Отправьте сообщение для рассылки.\n"
+        text += "Можно отправить текст, фото или видео с подписью.\n\n"
+        text += "После отправки вы увидите предпросмотр."
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="back_to_admin")]
+        ])
+        
+        await state.set_state(AdminStates.waiting_broadcast_content)
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+        await callback.answer()
+    
+    @dp.callback_query(F.data == "admin_subscriptions")
+    async def callback_admin_subscriptions(callback: CallbackQuery):
+        """Show subscription management menu"""
+        if not await is_admin(callback.from_user.id):
+            await callback.answer("❌ Доступ запрещен")
+            return
+        
+        text = "👥 <b>Управление подписками</b>\n\n"
+        text += "Выберите действие:"
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Выдать подписку", callback_data="admin_grant_sub")],
+            [InlineKeyboardButton(text="❌ Забрать подписку", callback_data="admin_revoke_sub")],
+            [InlineKeyboardButton(text="🔍 Проверить подписку", callback_data="admin_check_sub")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_admin")]
+        ])
+        
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+        await callback.answer()
+    
+    @dp.callback_query(F.data == "admin_export_csv")
+    async def callback_admin_export_csv(callback: CallbackQuery):
+        """Export users to detailed CSV"""
+        if not await is_admin(callback.from_user.id):
+            await callback.answer("❌ Доступ запрещен")
+            return
+        
+        await callback.answer("⏳ Генерирую CSV...")
+        
+        csv_content = await get_detailed_users_csv()
+        csv_file = BufferedInputFile(
+            csv_content.encode('utf-8-sig'),
+            filename=f"users_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        )
+        
+        await bot.send_document(
+            callback.from_user.id,
+            csv_file,
+            caption="📊 <b>Детальный экспорт пользователей</b>",
+            parse_mode="HTML"
+        )
+    
+    @dp.callback_query(F.data == "back_to_admin")
+    async def callback_back_to_admin(callback: CallbackQuery, state: FSMContext):
+        """Return to admin panel"""
+        await state.clear()
+        
+        if not await is_admin(callback.from_user.id):
+            await callback.answer("❌ Доступ запрещен")
+            return
+        
+        is_super = await is_super_admin(callback.from_user.id)
+        users_stats = await get_users_stats()
+        revenue = await get_revenue_stats()
+        
+        text = "👮 <b>Админ-панель MessageGuardian</b>\n\n"
+        text += f"👥 Всего пользователей: <b>{users_stats['total_users']}</b>\n"
+        text += f"✅ Активных подписок: <b>{users_stats['active_subscriptions']}</b>\n"
+        text += f"🆓 Пробных: <b>{users_stats['trial_users']}</b>\n"
+        text += f"💎 Платных: <b>{users_stats['paid_users']}</b>\n\n"
+        text += f"💰 Общая прибыль: <b>{revenue['total_stars']} ⭐</b>\n"
+        text += f"💳 Всего платежей: <b>{revenue['total_payments']}</b>\n\n"
+        text += "Выберите действие:"
+        
+        keyboard_buttons = [
+            [InlineKeyboardButton(text="📊 Статистика прибыли", callback_data="admin_revenue")],
+            [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
+            [InlineKeyboardButton(text="👥 Управление подписками", callback_data="admin_subscriptions")],
+            [InlineKeyboardButton(text="📥 Выгрузить CSV", callback_data="admin_export_csv")]
+        ]
+        
+        if is_super:
+            keyboard_buttons.append([InlineKeyboardButton(text="👑 Управление админами", callback_data="admin_manage_admins")])
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+        await callback.answer()
+    
+    @dp.message(AdminStates.waiting_broadcast_content)
+    async def process_broadcast_content(message: Message, state: FSMContext):
+        """Process broadcast message content"""
+        if not await is_admin(message.from_user.id):
+            return
+        
+        # Save message data
+        await state.update_data(
+            text=message.text or message.caption,
+            photo=message.photo[-1].file_id if message.photo else None,
+            video=message.video.file_id if message.video else None
+        )
+        
+        # Show preview
+        text = "📢 <b>Предпросмотр рассылки</b>\n\n"
+        if message.photo:
+            text += "📸 Фото с подписью\n"
+        elif message.video:
+            text += "🎥 Видео с подписью\n"
+        else:
+            text += "📝 Текстовое сообщение\n"
+        
+        users = await get_all_users()
+        text += f"\n👥 Будет отправлено: <b>{len(users)}</b> пользователям\n\n"
+        text += "Подтвердите рассылку:"
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Подтвердить", callback_data="confirm_broadcast")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="back_to_admin")]
+        ])
+        
+        await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
+    
+    @dp.callback_query(F.data == "confirm_broadcast")
+    async def callback_confirm_broadcast(callback: CallbackQuery, state: FSMContext):
+        """Confirm and send broadcast"""
+        if not await is_admin(callback.from_user.id):
+            await callback.answer("❌ Доступ запрещен")
+            return
+        
+        data = await state.get_data()
+        users = await get_all_users()
+        
+        await callback.message.edit_text("📤 Рассылка началась...", parse_mode="HTML")
+        
+        success = 0
+        failed = 0
+        
+        for user in users:
+            try:
+                if data.get('photo'):
+                    await bot.send_photo(user['user_id'], data['photo'], caption=data.get('text'))
+                elif data.get('video'):
+                    await bot.send_video(user['user_id'], data['video'], caption=data.get('text'))
+                else:
+                    await bot.send_message(user['user_id'], data.get('text'))
+                success += 1
+                await asyncio.sleep(0.05)
+            except:
+                failed += 1
+        
+        await state.clear()
+        await callback.message.edit_text(
+            f"✅ <b>Рассылка завершена!</b>\n\n"
+            f"✅ Успешно: {success}\n"
+            f"❌ Ошибок: {failed}",
+            parse_mode="HTML"
+        )
+        await callback.answer()
     
     # ==================== ADMIN COMMANDS ====================
     
@@ -1424,10 +1730,7 @@ async def main() -> None:
             try:
                 await bot.send_message(
                     user_id,
-                    "✅ <b>Бот успешно подключен!</b>\n\n"
-                    "🤖 MessageGuardian теперь отслеживает ваши бизнес-чаты.\n"
-                    "Все удаленные и измененные сообщения будут сохранены.\n\n"
-                    "💡 <b>Для View Once медиа:</b> ответьте на сообщение, чтобы сохранить его.",
+                    "✅ <b>Бот успешно добавлен</b>",
                     parse_mode="HTML"
                 )
             except Exception as e:
@@ -1457,13 +1760,6 @@ async def main() -> None:
             return
         
         # ===== PRIORITY: View Once media - process BEFORE subscription check =====
-        # Debug logging for reply messages
-        if message.reply_to_message:
-            print(f"🔍 DEBUG: Есть reply_to_message")
-            print(f"🔍 DEBUG: has photo: {bool(message.reply_to_message.photo)}")
-            print(f"🔍 DEBUG: has video: {bool(message.reply_to_message.video)}")
-            print(f"🔍 DEBUG: has_media_spoiler: {message.reply_to_message.has_media_spoiler}")
-            print(f"🔍 DEBUG: content_type: {message.reply_to_message.content_type if hasattr(message.reply_to_message, 'content_type') else 'N/A'}")
         
         # View Once photo via reply - Business API doesn't set has_media_spoiler, so check just for photo
         if message.reply_to_message and message.reply_to_message.photo:
@@ -1674,12 +1970,37 @@ async def main() -> None:
         print(f"📊 Всего сообщений в БД для чата {event.chat.id}: {total_messages}")
         print(f"📊 Удаляется сообщений: {len(event.message_ids)}")
         
+        # Track deletions for this chat
+        import time
+        current_time = time.time()
+        chat_id = event.chat.id
+        
+        if chat_id not in recent_deletions:
+            recent_deletions[chat_id] = []
+        
+        # Clean old deletions (older than 10 seconds)
+        recent_deletions[chat_id] = [(t, c) for t, c in recent_deletions[chat_id] if current_time - t < 10]
+        
+        # Add current deletion
+        recent_deletions[chat_id].append((current_time, len(event.message_ids)))
+        
+        # Calculate total deletions in last 10 seconds
+        total_recent_deletions = sum(c for _, c in recent_deletions[chat_id])
+        
         # Check if this is a full chat clear
-        # If deleting >5 messages at once OR >30% of messages, consider it a chat clear
+        # Conditions:
+        # 1. Deleting >=2 messages at once OR
+        # 2. >20% of messages deleted OR
+        # 3. Multiple deletions in 10 seconds totaling >=3 messages
         percentage = (len(event.message_ids) / total_messages * 100) if total_messages > 0 else 0
-        is_chat_clear = (len(event.message_ids) >= 5) or (percentage > 30)
+        is_chat_clear = (
+            (len(event.message_ids) >= 2) or 
+            (percentage > 20) or 
+            (total_recent_deletions >= 3)
+        )
         
         print(f"📊 Процент удаляемых сообщений: {percentage:.1f}%")
+        print(f"📊 Удалений за последние 10 сек: {total_recent_deletions}")
         print(f"📊 Определено как очистка чата: {is_chat_clear}")
         
         if is_chat_clear:
