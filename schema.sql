@@ -73,8 +73,48 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- Таблица подключений Telegram Business
+CREATE TABLE IF NOT EXISTS business_connections (
+    connection_id VARCHAR(255) PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    username VARCHAR(255),
+    first_name VARCHAR(255),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Таблица подписок пользователей
+CREATE TABLE IF NOT EXISTS subscriptions (
+    user_id BIGINT PRIMARY KEY,
+    subscription_type VARCHAR(50) NOT NULL, -- 'trial', 'week', 'month', 'year', 'lifetime'
+    start_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    end_date TIMESTAMP NOT NULL,
+    is_active BOOLEAN DEFAULT TRUE,
+    auto_renew BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Таблица истории платежей
+CREATE TABLE IF NOT EXISTS payment_history (
+    id SERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    subscription_type VARCHAR(50) NOT NULL,
+    amount INTEGER NOT NULL, -- в звездах
+    payment_id VARCHAR(255),
+    status VARCHAR(50) DEFAULT 'pending', -- 'pending', 'completed', 'failed'
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Индексы
+CREATE INDEX IF NOT EXISTS idx_business_connections_user ON business_connections(user_id);
+CREATE INDEX IF NOT EXISTS idx_subscriptions_active ON subscriptions(user_id, is_active);
+CREATE INDEX IF NOT EXISTS idx_payment_history_user ON payment_history(user_id);
+
 COMMENT ON TABLE users IS 'Зарегистрированные пользователи бота';
 COMMENT ON TABLE failed_logins IS 'История неудачных попыток входа';
 COMMENT ON TABLE banned_users IS 'Заблокированные пользователи';
 COMMENT ON TABLE messages IS 'Временное хранилище сообщений (удаляются после отправки уведомления)';
 COMMENT ON TABLE stats IS 'Статистика по каждому пользователю';
+COMMENT ON TABLE business_connections IS 'Подключения к Telegram Business API';
+COMMENT ON TABLE subscriptions IS 'Подписки пользователей на бота';
+COMMENT ON TABLE payment_history IS 'История платежей пользователей';

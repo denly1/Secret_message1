@@ -2,10 +2,12 @@ import os
 import asyncio
 from pathlib import Path
 from typing import Optional
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, BusinessMessagesDeleted, FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, BusinessMessagesDeleted, FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice, PreCheckoutQuery
 from aiogram.filters import Command
+from aiogram.enums import ParseMode
 import asyncpg
 
 load_dotenv()
@@ -61,6 +63,133 @@ async def close_db():
     if db_pool:
         await db_pool.close()
         print("✅ PostgreSQL connection pool closed")
+
+
+# ==================== SUBSCRIPTION FUNCTIONS ====================
+
+async def create_trial_subscription(user_id: int) -> None:
+    """Create 7-day trial subscription for new user"""
+    async with db_pool.acquire() as conn:
+        end_date = datetime.now() + timedelta(days=7)
+        await conn.execute(
+            """
+            INSERT INTO subscriptions (user_id, subscription_type, start_date, end_date, is_active)
+            VALUES ($1, 'trial', NOW(), $2, TRUE)
+            ON CONFLICT (user_id) DO NOTHING
+            """,
+            user_id, end_date
+        )
+
+
+async def check_subscription(user_id: int) -> dict:
+    """Check if user has active subscription"""
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT subscription_type, end_date, is_active
+            FROM subscriptions
+            WHERE user_id = $1
+            """,
+            user_id
+        )
+        
+        if not row:
+            return {"active": False, "type": None, "days_left": 0}
+        
+        if not row['is_active']:
+            return {"active": False, "type": row['subscription_type'], "days_left": 0}
+        
+        days_left = (row['end_date'] - datetime.now()).days
+        
+        if days_left < 0:
+            # Subscription expired
+            await conn.execute(
+                "UPDATE subscriptions SET is_active = FALSE WHERE user_id = $1",
+                user_id
+            )
+            return {"active": False, "type": row['subscription_type'], "days_left": 0}
+        
+        return {
+            "active": True,
+            "type": row['subscription_type'],
+            "days_left": days_left,
+            "end_date": row['end_date']
+        }
+
+
+async def grant_subscription(user_id: int, sub_type: str, days: int) -> None:
+    """Grant subscription to user (admin function)"""
+    async with db_pool.acquire() as conn:
+        end_date = datetime.now() + timedelta(days=days)
+        await conn.execute(
+            """
+            INSERT INTO subscriptions (user_id, subscription_type, start_date, end_date, is_active)
+            VALUES ($1, $2, NOW(), $3, TRUE)
+            ON CONFLICT (user_id) DO UPDATE
+            SET subscription_type = $2, start_date = NOW(), end_date = $3, is_active = TRUE, updated_at = NOW()
+            """,
+            user_id, sub_type, end_date
+        )
+
+
+async def revoke_subscription(user_id: int) -> None:
+    """Revoke user subscription (admin function)"""
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE subscriptions SET is_active = FALSE, updated_at = NOW() WHERE user_id = $1",
+            user_id
+        )
+
+
+async def extend_subscription(user_id: int, sub_type: str, days: int) -> None:
+    """Extend or create subscription after payment"""
+    async with db_pool.acquire() as conn:
+        # Check if user has active subscription
+        row = await conn.fetchrow(
+            "SELECT end_date, is_active FROM subscriptions WHERE user_id = $1",
+            user_id
+        )
+        
+        if row and row['is_active']:
+            # Extend existing subscription
+            new_end_date = row['end_date'] + timedelta(days=days)
+        else:
+            # Create new subscription
+            new_end_date = datetime.now() + timedelta(days=days)
+        
+        await conn.execute(
+            """
+            INSERT INTO subscriptions (user_id, subscription_type, start_date, end_date, is_active)
+            VALUES ($1, $2, NOW(), $3, TRUE)
+            ON CONFLICT (user_id) DO UPDATE
+            SET subscription_type = $2, end_date = $3, is_active = TRUE, updated_at = NOW()
+            """,
+            user_id, sub_type, new_end_date
+        )
+
+
+async def save_payment(user_id: int, sub_type: str, amount: int, payment_id: str, status: str = 'completed') -> None:
+    """Save payment to history"""
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO payment_history (user_id, subscription_type, amount, payment_id, status)
+            VALUES ($1, $2, $3, $4, $5)
+            """,
+            user_id, sub_type, amount, payment_id, status
+        )
+
+
+async def get_all_users() -> list:
+    """Get all authenticated users for broadcast"""
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT user_id, username, first_name FROM users WHERE is_authenticated = TRUE"
+        )
+        return [dict(row) for row in rows]
+
+
+# ==================== END SUBSCRIPTION FUNCTIONS ====================
 
 
 async def save_message(owner_id: int, chat_id: int, message_id: int, user_id: int | None, text: str | None,
@@ -556,18 +685,35 @@ async def main() -> None:
         # Auto-authenticate user
         if not await is_user_authenticated(user_id):
             await authenticate_user(user_id, username, first_name)
+            # Create trial subscription for new user
+            await create_trial_subscription(user_id)
         
+        # Check subscription status
+        sub_status = await check_subscription(user_id)
         stats = await get_stats(user_id)
         
-        # Inline keyboard with instruction link
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        # Build keyboard based on subscription status
+        keyboard_buttons = [
             [InlineKeyboardButton(text="📚 Инструкция по подключению", url="https://t.me/MessageAssistant/4")]
-        ])
+        ]
+        
+        if not sub_status['active']:
+            # Add subscription button if expired
+            keyboard_buttons.append([InlineKeyboardButton(text="💳 Купить подписку", callback_data="buy_subscription")])
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
+        
+        # Build subscription info
+        if sub_status['active']:
+            sub_info = f"✅ <b>Подписка активна</b>\n📅 Осталось дней: <b>{sub_status['days_left']}</b>\n"
+        else:
+            sub_info = "😢 <b>Пробный период закончился</b>\n💳 Можете приобрести подписку\n"
         
         caption_text = (
             "<b>👋 Добро пожаловать!</b>\n\n"
             "Этот бот создан для сохранения всех деталей переписки, "
             "даже в случае их изменения или удаления 🤫\n\n"
+            f"{sub_info}\n"
             f"📊 <b>Статистика:</b>\n"
             f"📨 Сообщений: <b>{stats['messages']}</b>\n"
             f"✏️ Изменений: <b>{stats['edits']}</b>\n"
@@ -649,25 +795,268 @@ async def main() -> None:
         if user_id != ADMIN_ID:
             return
         
-        banned = await get_banned_users()
-        failed = await get_failed_logins()
+        # Admin panel with buttons
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Выдать подписку", callback_data="admin_grant")],
+            [InlineKeyboardButton(text="❌ Забрать подписку", callback_data="admin_revoke")],
+            [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
+            [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")]
+        ])
         
-        text = "👮 <b>Админ-панель</b>\n\n"
-        text += f"🚫 <b>Заблокированные ({len(banned)}):</b>\n"
-        if banned:
-            for user in banned[:5]:
-                text += f"• {user['first_name']} (@{user['username']}) - ID: {user['user_id']}\n"
-        else:
-            text += "<i>Нет заблокированных</i>\n"
+        text = "👮 <b>Админ-панель MessageGuardian</b>\n\n"
+        text += "Выберите действие:"
         
-        text += f"\n❌ <b>Неудачные попытки ({len(failed)}):</b>\n"
-        if failed:
-            for attempt in failed[:5]:
-                text += f"• {attempt['first_name']} (@{attempt['username']}) - Попыток: {attempt['attempts']}\n"
-        else:
-            text += "<i>Нет неудачных попыток</i>\n"
+        await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
+    
+    # ==================== SUBSCRIPTION CALLBACKS ====================
+    
+    @dp.callback_query(F.data == "buy_subscription")
+    async def callback_buy_subscription(callback):
+        """Show subscription options"""
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⭐ Неделя - 50 звёзд", callback_data="sub_week")],
+            [InlineKeyboardButton(text="⭐ Месяц - 100 звёзд", callback_data="sub_month")],
+            [InlineKeyboardButton(text="⭐ Год - 550 звёзд", callback_data="sub_year")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_start")]
+        ])
         
-        await message.answer(text, parse_mode="HTML")
+        text = (
+            "💳 <b>Выберите подписку:</b>\n\n"
+            "⭐ <b>Неделя</b> - 50 звёзд (7 дней)\n"
+            "⭐ <b>Месяц</b> - 100 звёзд (30 дней)\n"
+            "⭐ <b>Год</b> - 550 звёзд (365 дней)\n\n"
+            "💡 Оплата через Telegram Stars"
+        )
+        
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+        await callback.answer()
+    
+    @dp.callback_query(F.data.startswith("sub_"))
+    async def callback_subscribe(callback):
+        """Process subscription purchase"""
+        user_id = callback.from_user.id
+        sub_type = callback.data.split("_")[1]
+        
+        # Define subscription parameters
+        prices = {
+            "week": (50, 7, "Неделя"),
+            "month": (100, 30, "Месяц"),
+            "year": (550, 365, "Год")
+        }
+        
+        if sub_type not in prices:
+            await callback.answer("❌ Неверный тип подписки")
+            return
+        
+        amount, days, name = prices[sub_type]
+        
+        # Create invoice
+        await bot.send_invoice(
+            chat_id=user_id,
+            title=f"Подписка MessageGuardian - {name}",
+            description=f"Подписка на {days} дней",
+            payload=f"subscription_{sub_type}_{user_id}",
+            provider_token="",  # Empty for Stars
+            currency="XTR",  # Telegram Stars
+            prices=[LabeledPrice(label=f"Подписка {name}", amount=amount)]
+        )
+        
+        await callback.answer()
+    
+    @dp.pre_checkout_query()
+    async def process_pre_checkout(pre_checkout_query: PreCheckoutQuery):
+        """Approve payment"""
+        await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
+    
+    @dp.message(F.successful_payment)
+    async def process_successful_payment(message: Message):
+        """Handle successful payment"""
+        user_id = message.from_user.id
+        payment = message.successful_payment
+        
+        # Parse payload
+        payload_parts = payment.invoice_payload.split("_")
+        if len(payload_parts) >= 2:
+            sub_type = payload_parts[1]
+            
+            # Define days
+            days_map = {"week": 7, "month": 30, "year": 365}
+            days = days_map.get(sub_type, 7)
+            
+            # Extend subscription
+            await extend_subscription(user_id, sub_type, days)
+            
+            # Save payment
+            await save_payment(user_id, sub_type, payment.total_amount, payment.telegram_payment_charge_id)
+            
+            # Send confirmation
+            await message.answer(
+                f"✅ <b>Оплата успешна!</b>\n\n"
+                f"💳 Подписка активирована на {days} дней\n"
+                f"🎉 Спасибо за поддержку!",
+                parse_mode="HTML"
+            )
+    
+    # ==================== ADMIN CALLBACKS ====================
+    
+    @dp.callback_query(F.data == "admin_grant")
+    async def callback_admin_grant(callback):
+        """Grant subscription to user"""
+        if callback.from_user.id != ADMIN_ID:
+            await callback.answer("❌ Доступ запрещён")
+            return
+        
+        text = (
+            "✅ <b>Выдача подписки</b>\n\n"
+            "Отправьте сообщение в формате:\n"
+            "<code>grant USER_ID DAYS</code>\n\n"
+            "Пример: <code>grant 123456789 30</code>"
+        )
+        
+        await callback.message.edit_text(text, parse_mode="HTML")
+        await callback.answer()
+    
+    @dp.callback_query(F.data == "admin_revoke")
+    async def callback_admin_revoke(callback):
+        """Revoke subscription from user"""
+        if callback.from_user.id != ADMIN_ID:
+            await callback.answer("❌ Доступ запрещён")
+            return
+        
+        text = (
+            "❌ <b>Отзыв подписки</b>\n\n"
+            "Отправьте сообщение в формате:\n"
+            "<code>revoke USER_ID</code>\n\n"
+            "Пример: <code>revoke 123456789</code>"
+        )
+        
+        await callback.message.edit_text(text, parse_mode="HTML")
+        await callback.answer()
+    
+    @dp.callback_query(F.data == "admin_broadcast")
+    async def callback_admin_broadcast(callback):
+        """Broadcast message to all users"""
+        if callback.from_user.id != ADMIN_ID:
+            await callback.answer("❌ Доступ запрещён")
+            return
+        
+        text = (
+            "📢 <b>Рассылка сообщений</b>\n\n"
+            "Отправьте сообщение (текст/фото/текст+фото) которое хотите разослать всем пользователям.\n\n"
+            "Для отправки используйте команду:\n"
+            "<code>broadcast</code> перед сообщением"
+        )
+        
+        await callback.message.edit_text(text, parse_mode="HTML")
+        await callback.answer()
+    
+    @dp.callback_query(F.data == "admin_stats")
+    async def callback_admin_stats(callback):
+        """Show admin statistics"""
+        if callback.from_user.id != ADMIN_ID:
+            await callback.answer("❌ Доступ запрещён")
+            return
+        
+        users = await get_all_users()
+        
+        # Count active subscriptions
+        active_subs = 0
+        async with db_pool.acquire() as conn:
+            active_subs = await conn.fetchval(
+                "SELECT COUNT(*) FROM subscriptions WHERE is_active = TRUE"
+            )
+        
+        text = (
+            "📊 <b>Статистика бота</b>\n\n"
+            f"👥 Всего пользователей: <b>{len(users)}</b>\n"
+            f"✅ Активных подписок: <b>{active_subs}</b>\n"
+        )
+        
+        await callback.message.edit_text(text, parse_mode="HTML")
+        await callback.answer()
+    
+    # ==================== ADMIN COMMANDS ====================
+    
+    @dp.message(F.text.startswith("grant "))
+    async def admin_grant_subscription(message: Message):
+        """Admin command to grant subscription"""
+        if message.from_user.id != ADMIN_ID:
+            return
+        
+        try:
+            parts = message.text.split()
+            target_user_id = int(parts[1])
+            days = int(parts[2])
+            
+            await grant_subscription(target_user_id, "admin_grant", days)
+            
+            await message.answer(
+                f"✅ Подписка выдана пользователю {target_user_id} на {days} дней",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            await message.answer(f"❌ Ошибка: {e}")
+    
+    @dp.message(F.text.startswith("revoke "))
+    async def admin_revoke_subscription(message: Message):
+        """Admin command to revoke subscription"""
+        if message.from_user.id != ADMIN_ID:
+            return
+        
+        try:
+            parts = message.text.split()
+            target_user_id = int(parts[1])
+            
+            await revoke_subscription(target_user_id)
+            
+            await message.answer(
+                f"❌ Подписка отозвана у пользователя {target_user_id}",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            await message.answer(f"❌ Ошибка: {e}")
+    
+    @dp.message(F.text == "broadcast", F.reply_to_message)
+    async def admin_broadcast_message(message: Message):
+        """Admin command to broadcast message"""
+        if message.from_user.id != ADMIN_ID:
+            return
+        
+        users = await get_all_users()
+        replied_msg = message.reply_to_message
+        
+        success = 0
+        failed = 0
+        
+        for user in users:
+            try:
+                if replied_msg.photo:
+                    # Send photo with caption
+                    await bot.send_photo(
+                        user['user_id'],
+                        replied_msg.photo[-1].file_id,
+                        caption=replied_msg.caption or replied_msg.text,
+                        parse_mode="HTML"
+                    )
+                elif replied_msg.text:
+                    # Send text
+                    await bot.send_message(
+                        user['user_id'],
+                        replied_msg.text,
+                        parse_mode="HTML"
+                    )
+                success += 1
+                await asyncio.sleep(0.05)  # Rate limiting
+            except Exception as e:
+                failed += 1
+                print(f"Failed to send to {user['user_id']}: {e}")
+        
+        await message.answer(
+            f"📢 Рассылка завершена\n\n"
+            f"✅ Успешно: {success}\n"
+            f"❌ Ошибок: {failed}",
+            parse_mode="HTML"
+        )
     
     
     
@@ -719,6 +1108,13 @@ async def main() -> None:
         
         if not is_auth:
             print(f"⚠️ Пользователь {owner_id} не авторизован, пропускаю сообщение")
+            return
+        
+        # Check subscription
+        sub_status = await check_subscription(owner_id)
+        if not sub_status['active']:
+            print(f"⚠️ У пользователя {owner_id} истекла подписка")
+            # Don't process messages, user needs to renew
             return
         
         media_type = None
