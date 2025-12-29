@@ -325,7 +325,7 @@ async def get_users_stats() -> dict:
 
 
 async def get_detailed_users_csv() -> str:
-    """Generate detailed CSV with user statistics for Excel"""
+    """Generate compact CSV optimized for mobile viewing"""
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT 
@@ -352,54 +352,37 @@ async def get_detailed_users_csv() -> str:
         active_subs = sum(1 for row in rows if row['is_active'])
         
         output = io.StringIO()
-        writer = csv.writer(output, delimiter=';')  # Use semicolon for better Excel compatibility
+        writer = csv.writer(output, delimiter=',')  # Comma for mobile compatibility
         
-        # Header section
-        writer.writerow(['=== ОТЧЕТ ПО ПОЛЬЗОВАТЕЛЯМ MessageGuardian ==='])
-        writer.writerow([f'Дата создания: {datetime.now().strftime("%d.%m.%Y %H:%M")}'])
+        # Compact header
+        writer.writerow(['MessageGuardian - Отчет', datetime.now().strftime("%d.%m.%Y %H:%M")])
         writer.writerow([])
         
-        # Summary section
-        writer.writerow(['=== ОБЩАЯ СТАТИСТИКА ==='])
-        writer.writerow(['Показатель', 'Значение'])
-        writer.writerow(['Всего пользователей', total_users])
-        writer.writerow(['Активных подписок', active_subs])
-        writer.writerow(['Общая прибыль (звезды)', total_revenue])
-        writer.writerow(['Всего платежей', total_payments])
-        writer.writerow(['Средний чек (звезды)', f'{total_revenue/total_payments:.2f}' if total_payments > 0 else '0'])
+        # Summary (compact)
+        writer.writerow(['СТАТИСТИКА'])
+        writer.writerow(['Пользователей', total_users])
+        writer.writerow(['Активных', active_subs])
+        writer.writerow(['Прибыль ⭐', total_revenue])
+        writer.writerow(['Платежей', total_payments])
+        writer.writerow(['Средний чек', f'{total_revenue/total_payments:.1f}' if total_payments > 0 else '0'])
         writer.writerow([])
         
-        # Main data section
-        writer.writerow(['=== ДЕТАЛЬНАЯ ИНФОРМАЦИЯ ПО ПОЛЬЗОВАТЕЛЯМ ==='])
-        writer.writerow([
-            'User ID', 
-            'Username', 
-            'Имя', 
-            'Дата регистрации', 
-            'Тип подписки', 
-            'Активна', 
-            'Дата окончания', 
-            'Потрачено звезд', 
-            'Кол-во платежей'
-        ])
+        # Compact user table (mobile-friendly columns)
+        writer.writerow(['ID', 'Имя', 'Username', 'Подписка', 'Активна', 'Потрачено ⭐', 'Платежей'])
         
         for row in rows:
             writer.writerow([
                 row['user_id'],
-                f"@{row['username']}" if row['username'] else 'Нет username',
-                row['first_name'] or 'Без имени',
-                row['registered_at'].strftime('%d.%m.%Y %H:%M') if row['registered_at'] else 'Неизвестно',
-                row['subscription_type'] or 'Нет подписки',
-                'Да' if row['is_active'] else 'Нет',
-                row['end_date'].strftime('%d.%m.%Y') if row['end_date'] else '-',
+                row['first_name'] or 'N/A',
+                f"@{row['username']}" if row['username'] else '-',
+                row['subscription_type'] or 'trial',
+                '✓' if row['is_active'] else '✗',
                 row['total_spent'],
                 row['payments_count']
             ])
         
-        # Footer section
         writer.writerow([])
-        writer.writerow(['=== КОНЕЦ ОТЧЕТА ==='])
-        writer.writerow([f'Всего записей: {total_users}'])
+        writer.writerow(['Всего записей:', total_users])
         
         return output.getvalue()
 
@@ -1364,8 +1347,8 @@ async def main() -> None:
         text += f"👥 Всего пользователей: <b>{users_stats['total_users']}</b>\n"
         text += f"✅ Активных подписок: <b>{users_stats['active_subscriptions']}</b>\n"
         text += f"🆓 Пробных: <b>{users_stats['trial_users']}</b>\n"
-        text += f"� Платных: <b>{users_stats['paid_users']}</b>\n\n"
-        text += f"� Общая прибыль: <b>{revenue['total_stars']} ⭐</b>\n"
+        text += f"💰 Платных: <b>{users_stats['paid_users']}</b>\n\n"
+        text += f"💸 Общая прибыль: <b>{revenue['total_stars']} ⭐</b>\n"
         text += f"💳 Всего платежей: <b>{revenue['total_payments']}</b>\n\n"
         text += "Выберите действие:"
         
@@ -1390,7 +1373,6 @@ async def main() -> None:
     async def callback_buy_subscription(callback):
         """Show subscription options"""
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🧪 ТЕСТ - 1 звезда (7 дней)", callback_data="sub_test")],
             [InlineKeyboardButton(text="⭐ Неделя - 50 звёзд", callback_data="sub_week")],
             [InlineKeyboardButton(text="⭐ Месяц - 100 звёзд", callback_data="sub_month")],
             [InlineKeyboardButton(text="⭐ Год - 550 звёзд", callback_data="sub_year")],
@@ -1471,30 +1453,27 @@ async def main() -> None:
             await bot.send_message(user_id, caption_text, parse_mode="HTML", reply_markup=keyboard)
     
     @dp.callback_query(F.data.startswith("sub_"))
-    async def callback_subscribe(callback):
+    async def callback_process_subscription(callback: CallbackQuery):
         """Process subscription purchase"""
-        user_id = callback.from_user.id
         sub_type = callback.data.split("_")[1]
+        user_id = callback.from_user.id
         
-        # Define subscription parameters
-        prices = {
-            "test": (1, 7, "Тест"),
-            "week": (50, 7, "Неделя"),
-            "month": (100, 30, "Месяц"),
-            "year": (550, 365, "Год")
-        }
+        # Define prices and names
+        prices = {"week": 50, "month": 100, "year": 550}
+        names = {"week": "Неделя", "month": "Месяц", "year": "Год"}
         
         if sub_type not in prices:
             await callback.answer("❌ Неверный тип подписки")
             return
         
-        amount, days, name = prices[sub_type]
+        amount = prices[sub_type]
+        name = names[sub_type]
         
         # Create invoice
         await bot.send_invoice(
             chat_id=user_id,
             title=f"Подписка MessageGuardian - {name}",
-            description=f"Подписка на {days} дней",
+            description=f"Подписка на бота",
             payload=f"subscription_{sub_type}_{user_id}",
             provider_token="",  # Empty for Stars
             currency="XTR",  # Telegram Stars
@@ -1520,7 +1499,7 @@ async def main() -> None:
             sub_type = payload_parts[1]
             
             # Define days
-            days_map = {"test": 7, "week": 7, "month": 30, "year": 365}
+            days_map = {"week": 7, "month": 30, "year": 365}
             days = days_map.get(sub_type, 7)
             
             # Extend subscription
@@ -1864,6 +1843,38 @@ async def main() -> None:
             keyboard_buttons.append([InlineKeyboardButton(text="👑 Управление админами", callback_data="admin_manage_admins")])
         
         keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+        await callback.answer()
+    
+    @dp.callback_query(F.data == "admin_manage_admins")
+    async def callback_admin_manage_admins(callback: CallbackQuery):
+        """Manage admins (super admin only)"""
+        if not await is_super_admin(callback.from_user.id):
+            await callback.answer("❌ Доступ запрещен")
+            return
+        
+        async with db_pool.acquire() as conn:
+            admins = await conn.fetch(
+                "SELECT user_id, username, first_name, is_super_admin, created_at FROM admins ORDER BY created_at DESC"
+            )
+        
+        text = "👑 <b>Управление администраторами</b>\n\n"
+        
+        if admins:
+            for admin in admins:
+                super_badge = "👑" if admin['is_super_admin'] else "👮"
+                text += f"{super_badge} <b>{admin['first_name']}</b> (@{admin['username'] or 'N/A'})\n"
+                text += f"   ID: <code>{admin['user_id']}</code>\n\n"
+        else:
+            text += "<i>Нет администраторов</i>\n\n"
+        
+        text += "\n💡 Для добавления админа используйте команду:\n"
+        text += "<code>/add_admin USER_ID</code>"
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_admin")]
+        ])
+        
         await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
         await callback.answer()
     
