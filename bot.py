@@ -51,6 +51,7 @@ class AdminStates(StatesGroup):
     waiting_revoke_user_id = State()
     waiting_check_user_id = State()
     waiting_add_admin_id = State()
+    waiting_remove_admin_id = State()
 
 
 async def init_db():
@@ -1884,6 +1885,7 @@ async def main() -> None:
         
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="➕ Добавить админа", callback_data="admin_add_admin")],
+            [InlineKeyboardButton(text="🗑 Удалить админа", callback_data="admin_remove_admin")],
             [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_admin")]
         ])
         
@@ -1967,6 +1969,96 @@ async def main() -> None:
             print(f"❌ Ошибка добавления админа: {e}")
             await message.answer(
                 "❌ <b>Ошибка при добавлении админа</b>\n\n"
+                f"Попробуйте еще раз",
+                parse_mode="HTML"
+            )
+            await state.clear()
+    
+    @dp.callback_query(F.data == "admin_remove_admin")
+    async def callback_admin_remove_admin(callback: CallbackQuery, state: FSMContext):
+        """Start remove admin process"""
+        if not await is_super_admin(callback.from_user.id):
+            await callback.answer("❌ Доступ запрещен")
+            return
+        
+        text = "🗑 <b>Удалить администратора</b>\n\n"
+        text += "Отправьте User ID администратора, которого хотите удалить:"
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="admin_manage_admins")]
+        ])
+        
+        await state.set_state(AdminStates.waiting_remove_admin_id)
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+        await callback.answer()
+    
+    @dp.message(AdminStates.waiting_remove_admin_id)
+    async def process_remove_admin_id(message: Message, state: FSMContext):
+        """Process admin ID and remove from database"""
+        if not await is_super_admin(message.from_user.id):
+            return
+        
+        try:
+            admin_id = int(message.text.strip())
+            
+            # Проверка: нельзя удалить себя
+            if admin_id == message.from_user.id:
+                await message.answer(
+                    "⚠️ <b>Нельзя удалить самого себя!</b>",
+                    parse_mode="HTML"
+                )
+                await state.clear()
+                return
+            
+            # Check if admin exists
+            async with db_pool.acquire() as conn:
+                existing = await conn.fetchrow(
+                    "SELECT user_id, first_name, username, is_super_admin FROM admins WHERE user_id = $1",
+                    admin_id
+                )
+                
+                if not existing:
+                    await message.answer(
+                        "⚠️ <b>Этот пользователь не является админом!</b>",
+                        parse_mode="HTML"
+                    )
+                    await state.clear()
+                    return
+                
+                # Проверка: нельзя удалить супер-админа
+                if existing['is_super_admin']:
+                    await message.answer(
+                        "⚠️ <b>Нельзя удалить супер-администратора!</b>",
+                        parse_mode="HTML"
+                    )
+                    await state.clear()
+                    return
+                
+                # Remove admin
+                await conn.execute(
+                    "DELETE FROM admins WHERE user_id = $1",
+                    admin_id
+                )
+            
+            await message.answer(
+                f"✅ <b>Админ удален!</b>\n\n"
+                f"👤 User ID: <code>{admin_id}</code>\n"
+                f"📝 Имя: {existing['first_name']}\n"
+                f"🔗 Username: @{existing['username'] or 'N/A'}",
+                parse_mode="HTML"
+            )
+            await state.clear()
+            
+        except ValueError:
+            await message.answer(
+                "❌ <b>Ошибка!</b>\n\n"
+                "Отправьте корректный User ID (число)",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            print(f"❌ Ошибка удаления админа: {e}")
+            await message.answer(
+                "❌ <b>Ошибка при удалении админа</b>\n\n"
                 f"Попробуйте еще раз",
                 parse_mode="HTML"
             )
@@ -2382,15 +2474,16 @@ async def main() -> None:
         
         # View Once photo via reply - Business API doesn't set has_media_spoiler, so check just for photo
         if message.reply_to_message and message.reply_to_message.photo:
-            # ВАЖНО: Отправлять только если это СОБЕСЕДНИК отвечает на фото, а не владелец
-            if message.from_user and message.from_user.id == owner_id:
-                print(f"ℹ️ Владелец отвечает на фото - пропускаю (не View Once)")
+            # Отправлять View Once фото от СОБЕСЕДНИКА (не от владельца в исходном сообщении)
+            # Владелец МОЖЕТ отвечать на исчезающие фото - это нормально
+            if message.reply_to_message.from_user and message.reply_to_message.from_user.id == owner_id:
+                print(f"ℹ️ Это ответ на фото владельца - пропускаю (не исчезающее)")
             else:
                 try:
                     orig_msg_id = message.reply_to_message.message_id
                     file_path = f"saved_media/{message.chat.id}_{orig_msg_id}_photo_reply.jpg"
                     
-                    print(f"📸 ОБНАРУЖЕНО View Once фото от собеседника! Скачиваю: {file_path}")
+                    print(f"📸 ОБНАРУЖЕНО исчезающее фото от собеседника! Скачиваю: {file_path}")
                     await bot.download(message.reply_to_message.photo[-1], destination=file_path)
                     
                     if not Path(file_path).exists():
@@ -2402,11 +2495,11 @@ async def main() -> None:
                     user_name = message.reply_to_message.from_user.first_name if message.reply_to_message.from_user else "Unknown"
                     user_username = f" (@{message.reply_to_message.from_user.username})" if message.reply_to_message.from_user and message.reply_to_message.from_user.username else ""
                     fancy_name = to_fancy(user_name)
-                    header = f"🔒 <b>View Once фото сохранено!</b>\n\n{fancy_name}{user_username} отправил(а) исчезающее фото"
+                    header = f"🔒 <b>Исчезающее фото сохранено!</b>\n\n{fancy_name}{user_username} отправил(а) исчезающее фото\n\n@MessageAssistantBot_bot"
                     
                     print(f"📤 Отправляю View Once фото владельцу {owner_id}")
                     await bot.send_photo(owner_id, FSInputFile(file_path), caption=header, parse_mode="HTML")
-                    print(f"✅ View Once фото успешно отправлено {owner_id}")
+                    print(f"✅ Исчезающее фото успешно отправлено {owner_id}")
                     
                     # Save to DB after successful send
                     await save_message(owner_id, message.chat.id, orig_msg_id,
@@ -2414,21 +2507,21 @@ async def main() -> None:
                                "", media_type="photo_reply", file_path=file_path,
                                caption=message.reply_to_message.caption)
                 except Exception as e:
-                    print(f"❌ Ошибка View Once фото: {e}")
+                    print(f"❌ Ошибка исчезающего фото: {e}")
                     import traceback
                     traceback.print_exc()
         
         # View Once video via reply - Business API doesn't set has_media_spoiler, so check just for video
         if message.reply_to_message and message.reply_to_message.video:
-            # ВАЖНО: Отправлять только если это СОБЕСЕДНИК отвечает на видео, а не владелец
-            if message.from_user and message.from_user.id == owner_id:
-                print(f"ℹ️ Владелец отвечает на видео - пропускаю (не View Once)")
+            # Отправлять View Once видео от СОБЕСЕДНИКА (не от владельца в исходном сообщении)
+            if message.reply_to_message.from_user and message.reply_to_message.from_user.id == owner_id:
+                print(f"ℹ️ Это ответ на видео владельца - пропускаю (не исчезающее)")
             else:
                 try:
                     orig_msg_id = message.reply_to_message.message_id
                     file_path = f"saved_media/{message.chat.id}_{orig_msg_id}_video_reply.mp4"
                     
-                    print(f"🎥 ОБНАРУЖЕНО View Once видео от собеседника! Скачиваю: {file_path}")
+                    print(f"🎥 ОБНАРУЖЕНО исчезающее видео от собеседника! Скачиваю: {file_path}")
                     await bot.download(message.reply_to_message.video, destination=file_path)
                     
                     if not Path(file_path).exists():
@@ -2440,11 +2533,11 @@ async def main() -> None:
                     user_name = message.reply_to_message.from_user.first_name if message.reply_to_message.from_user else "Unknown"
                     user_username = f" (@{message.reply_to_message.from_user.username})" if message.reply_to_message.from_user and message.reply_to_message.from_user.username else ""
                     fancy_name = to_fancy(user_name)
-                    header = f"🔒 <b>View Once видео сохранено!</b>\n\n{fancy_name}{user_username} отправил(а) исчезающее видео"
+                    header = f"🔒 <b>Исчезающее видео сохранено!</b>\n\n{fancy_name}{user_username} отправил(а) исчезающее видео\n\n@MessageAssistantBot_bot"
                     
                     print(f"📤 Отправляю View Once видео владельцу {owner_id}")
                     await bot.send_video(owner_id, FSInputFile(file_path), caption=header, parse_mode="HTML")
-                    print(f"✅ View Once видео успешно отправлено {owner_id}")
+                    print(f"✅ Исчезающее видео успешно отправлено {owner_id}")
                     
                     # Save to DB after successful send
                     await save_message(owner_id, message.chat.id, orig_msg_id,
@@ -2452,7 +2545,7 @@ async def main() -> None:
                                "", media_type="video_reply", file_path=file_path,
                                caption=message.reply_to_message.caption)
                 except Exception as e:
-                    print(f"❌ Ошибка View Once видео: {e}")
+                    print(f"❌ Ошибка исчезающего видео: {e}")
                     import traceback
                     traceback.print_exc()
         
@@ -2714,14 +2807,27 @@ async def main() -> None:
                 user_username = f" (@{event.chat.username})" if event.chat and event.chat.username else ""
                 fancy_name = to_fancy(user_name)
                 
+                # Функция для monospace форматирования
+                def to_monospace(text: str) -> str:
+                    mono_map = {
+                        'A': '𝙰', 'B': '𝙱', 'C': '𝙲', 'D': '𝙳', 'E': '𝙴', 'F': '𝙵', 'G': '𝙶', 'H': '𝙷', 'I': '𝙸', 'J': '𝙹',
+                        'K': '𝙺', 'L': '𝙻', 'M': '𝙼', 'N': '𝙽', 'O': '𝙾', 'P': '𝙿', 'Q': '𝚀', 'R': '𝚁', 'S': '𝚂', 'T': '𝚃',
+                        'U': '𝚄', 'V': '𝚅', 'W': '𝚆', 'X': '𝚇', 'Y': '𝚈', 'Z': '𝚉',
+                        'a': '𝚊', 'b': '𝚋', 'c': '𝚌', 'd': '𝚍', 'e': '𝚎', 'f': '𝚏', 'g': '𝚐', 'h': '𝚑', 'i': '𝚒', 'j': '𝚓',
+                        'k': '𝚔', 'l': '𝚕', 'm': '𝚖', 'n': '𝚗', 'o': '𝚘', 'p': '𝚙', 'q': '𝚚', 'r': '𝚛', 's': '𝚜', 't': '𝚝',
+                        'u': '𝚞', 'v': '𝚟', 'w': '𝚠', 'x': '𝚡', 'y': '𝚢', 'z': '𝚣',
+                        '0': '𝟶', '1': '𝟷', '2': '𝟸', '3': '𝟹', '4': '𝟺', '5': '𝟻', '6': '𝟼', '7': '𝟽', '8': '𝟾', '9': '𝟿'
+                    }
+                    return ''.join(mono_map.get(c, c) for c in text)
+                
                 caption_parts = []
                 if msg_data.get("text") and msg_data["text"].strip():
-                    caption_parts.append(f"📝 Текст: {msg_data['text']}")
+                    caption_parts.append(f"📝 Текст: {to_monospace(msg_data['text'])}")
                 elif msg_data.get("caption") and msg_data["caption"].strip():
-                    caption_parts.append(f"📝 Подпись: {msg_data['caption']}")
+                    caption_parts.append(f"📝 Подпись: {to_monospace(msg_data['caption'])}")
                 
                 if msg_data.get("links"):
-                    caption_parts.append(f"🔗 Ссылки: {msg_data['links']}")
+                    caption_parts.append(f"🔗 Ссылки: {to_monospace(msg_data['links'])}")
                 
                 header = f"{fancy_name}{user_username} удалил(а) сообщение:\n\n"
                 if caption_parts:
