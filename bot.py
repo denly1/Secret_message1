@@ -1247,7 +1247,7 @@ async def main() -> None:
         # Build keyboard
         keyboard_buttons = [
             [InlineKeyboardButton(text="📚 Инструкция по подключению", url="https://t.me/MessageAssistant/4")],
-            [InlineKeyboardButton(text="📖 Инструкция по использованию", callback_data="show_instructions")]
+            [InlineKeyboardButton(text="📖 Инструкция по использованию", url="https://t.me/MessageAssistant/5")]
         ]
         
         # Only show subscription button if trial expired
