@@ -2433,6 +2433,7 @@ async def main() -> None:
     @dp.deleted_business_messages()
     async def handle_deleted_business_messages(event: BusinessMessagesDeleted):
         print(f"🗑 Получено удаление {len(event.message_ids)} сообщений в чате {event.chat.id}")
+        print(f"🗑 Message IDs: {event.message_ids}")
         
         # Get owner_id and total messages in this chat
         async with db_pool.acquire() as conn:
@@ -2442,10 +2443,14 @@ async def main() -> None:
             )
             
             if not first_row:
-                print("⚠️ Не найден owner_id для удаленных сообщений")
+                print(f"⚠️ Не найден owner_id для удаленных сообщений в чате {event.chat.id}")
+                print(f"⚠️ Проверяю БД: есть ли вообще сообщения для этого чата...")
+                total_in_db = await conn.fetchval("SELECT COUNT(*) FROM messages WHERE chat_id = $1", event.chat.id)
+                print(f"⚠️ Всего сообщений в БД для чата {event.chat.id}: {total_in_db}")
                 return
             
             owner_id = first_row['owner_id']
+            print(f"✅ Owner ID найден: {owner_id}")
             
             # Count total messages in this chat
             total_messages = await conn.fetchval(
@@ -2516,14 +2521,21 @@ async def main() -> None:
                 row = await conn.fetchrow("SELECT * FROM messages WHERE chat_id = $1 AND message_id = $2", event.chat.id, msg_id)
                 
                 if not row:
+                    print(f"⚠️ Сообщение {msg_id} не найдено в БД")
                     continue
                 
                 owner_id = row["owner_id"]
                 msg_data = dict(row)
                 
+                print(f"📝 Обрабатываю удаление сообщения {msg_id}")
+                print(f"📝 user_id сообщения: {msg_data.get('user_id')}, owner_id: {owner_id}")
+                
                 if msg_data.get("user_id") == owner_id:
+                    print(f"ℹ️ Это твое сообщение - просто удаляю из БД без уведомления")
                     await delete_message_from_db(owner_id, event.chat.id, msg_id)
                     continue
+                
+                print(f"🔔 Это сообщение собеседника - отправляю уведомление!")
                 
                 await increment_stat(owner_id, "total_deletes")
                 
