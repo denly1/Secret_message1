@@ -1,8 +1,8 @@
 -- PostgreSQL Database Schema for MessageGuardian Multi-User Bot
 -- Database: Secret_message
 -- User: postgres
--- Password: 1
--- Port: 5432
+-- Password: 
+-- Port:
 
 -- Таблица пользователей бота
 CREATE TABLE IF NOT EXISTS users (
