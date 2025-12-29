@@ -50,6 +50,7 @@ class AdminStates(StatesGroup):
     waiting_grant_days = State()
     waiting_revoke_user_id = State()
     waiting_check_user_id = State()
+    waiting_add_admin_id = State()
 
 
 async def init_db():
@@ -1329,7 +1330,7 @@ async def main() -> None:
             "🔧 <b>Как подключить:</b>\n"
             "1. Откройте Настройки → Telegram Business\n"
             "2. Раздел 'Чаты' → 'Подключить бота'\n"
-            "3. Найдите @MessageGuardianBot\n"
+            "3. Найдите @MessageAssistantBot_bot\n"
             "4. Выберите 'Все личные чаты'\n\n"
             "💡 <b>Как сохранить View Once медиа:</b>\n"
             "• Ответьте на исчезающее фото/видео\n"
@@ -1880,17 +1881,97 @@ async def main() -> None:
                 text += f"{super_badge} <b>{admin['first_name']}</b> (@{admin['username'] or 'N/A'})\n"
                 text += f"   ID: <code>{admin['user_id']}</code>\n\n"
         else:
-            text += "<i>Нет администраторов</i>\n\n"
-        
-        text += "\n💡 Для добавления админа используйте команду:\n"
-        text += "<code>/add_admin USER_ID</code>"
+            text += "<i>Нет администраторов</i>\n"
         
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="➕ Добавить админа", callback_data="admin_add_admin")],
             [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_admin")]
         ])
         
         await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
         await callback.answer()
+    
+    @dp.callback_query(F.data == "admin_add_admin")
+    async def callback_admin_add_admin(callback: CallbackQuery, state: FSMContext):
+        """Start add admin process"""
+        if not await is_super_admin(callback.from_user.id):
+            await callback.answer("❌ Доступ запрещен")
+            return
+        
+        text = "➕ <b>Добавить администратора</b>\n\n"
+        text += "Отправьте User ID пользователя, которого хотите сделать админом:"
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="admin_manage_admins")]
+        ])
+        
+        await state.set_state(AdminStates.waiting_add_admin_id)
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+        await callback.answer()
+    
+    @dp.message(AdminStates.waiting_add_admin_id)
+    async def process_add_admin_id(message: Message, state: FSMContext):
+        """Process admin ID and add to database"""
+        if not await is_super_admin(message.from_user.id):
+            return
+        
+        try:
+            admin_id = int(message.text.strip())
+            
+            # Check if already admin
+            async with db_pool.acquire() as conn:
+                existing = await conn.fetchrow(
+                    "SELECT user_id FROM admins WHERE user_id = $1",
+                    admin_id
+                )
+                
+                if existing:
+                    await message.answer(
+                        "⚠️ <b>Этот пользователь уже является админом!</b>",
+                        parse_mode="HTML"
+                    )
+                    await state.clear()
+                    return
+                
+                # Get user info if exists
+                user_info = await conn.fetchrow(
+                    "SELECT username, first_name FROM users WHERE user_id = $1",
+                    admin_id
+                )
+                
+                username = user_info['username'] if user_info else 'unknown'
+                first_name = user_info['first_name'] if user_info else 'New Admin'
+                
+                # Add admin
+                await conn.execute(
+                    """INSERT INTO admins (user_id, username, first_name, added_by, is_super_admin)
+                       VALUES ($1, $2, $3, $4, FALSE)""",
+                    admin_id, username, first_name, message.from_user.id
+                )
+            
+            await message.answer(
+                f"✅ <b>Админ добавлен!</b>\n\n"
+                f"👤 User ID: <code>{admin_id}</code>\n"
+                f"📝 Имя: {first_name}\n"
+                f"🔗 Username: @{username}",
+                parse_mode="HTML"
+            )
+            await state.clear()
+            
+        except ValueError:
+            await message.answer(
+                "❌ <b>Ошибка!</b>\n\n"
+                "Отправьте корректный User ID (число)",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            print(f"❌ Ошибка добавления админа: {e}")
+            await message.answer(
+                "❌ <b>Ошибка при добавлении админа</b>\n\n"
+                f"Попробуйте еще раз",
+                parse_mode="HTML"
+            )
+            await state.clear()
     
     @dp.message(AdminStates.waiting_broadcast_content)
     async def process_broadcast_content(message: Message, state: FSMContext):
@@ -2437,7 +2518,12 @@ async def main() -> None:
         old_formatted = to_monospace(old) if old else '<i>Не найдено</i>'
         new_formatted = to_monospace(new) if new else '<i>Пусто</i>'
         
-        text = f"{fancy_name}{user_username} изменил(а) сообщение:\n\nOld:\n{old_formatted}\n\nNew:\n{new_formatted}"
+        text = (
+            f"{fancy_name}{user_username} изменил(а) сообщение:\n\n"
+            f"<blockquote>Old:\n{old_formatted}</blockquote>\n\n"
+            f"<blockquote>New:\n{new_formatted}</blockquote>\n\n"
+            f"@MessageAssistantBot_bot"
+        )
         
         try:
             await bot.send_message(owner_id, text, parse_mode="HTML")
@@ -2572,7 +2658,8 @@ async def main() -> None:
                 
                 header = f"{fancy_name}{user_username} удалил(а) сообщение:\n\n"
                 if caption_parts:
-                    header += "\n".join(caption_parts) + "\n\n"
+                    header += "<blockquote>" + "\n".join(caption_parts) + "</blockquote>\n\n"
+                header += "@MessageAssistantBot_bot"
                 
                 if msg_data.get("file_path") and Path(msg_data["file_path"]).exists():
                     try:
