@@ -2382,71 +2382,79 @@ async def main() -> None:
         
         # View Once photo via reply - Business API doesn't set has_media_spoiler, so check just for photo
         if message.reply_to_message and message.reply_to_message.photo:
-            try:
-                orig_msg_id = message.reply_to_message.message_id
-                file_path = f"saved_media/{message.chat.id}_{orig_msg_id}_photo_reply.jpg"
-                
-                print(f"📸 ОБНАРУЖЕНО View Once фото! Скачиваю: {file_path}")
-                await bot.download(message.reply_to_message.photo[-1], destination=file_path)
-                
-                if not Path(file_path).exists():
-                    print(f"❌ Файл не был создан: {file_path}")
-                    return
-                
-                print(f"✅ Файл сохранён: {file_path}, размер: {Path(file_path).stat().st_size} байт")
-                
-                user_name = message.reply_to_message.from_user.first_name if message.reply_to_message.from_user else "Unknown"
-                user_username = f" (@{message.reply_to_message.from_user.username})" if message.reply_to_message.from_user and message.reply_to_message.from_user.username else ""
-                fancy_name = to_fancy(user_name)
-                header = f"🔒 <b>View Once фото сохранено!</b>\n\n{fancy_name}{user_username} отправил(а) исчезающее фото"
-                
-                print(f"📤 Отправляю View Once фото владельцу {owner_id}")
-                await bot.send_photo(owner_id, FSInputFile(file_path), caption=header, parse_mode="HTML")
-                print(f"✅ View Once фото успешно отправлено {owner_id}")
-                
-                # Save to DB after successful send
-                await save_message(owner_id, message.chat.id, orig_msg_id,
-                           message.reply_to_message.from_user.id if message.reply_to_message.from_user else None,
-                           "", media_type="photo_reply", file_path=file_path,
-                           caption=message.reply_to_message.caption)
-            except Exception as e:
-                print(f"❌ Ошибка View Once фото: {e}")
-                import traceback
-                traceback.print_exc()
+            # ВАЖНО: Отправлять только если это СОБЕСЕДНИК отвечает на фото, а не владелец
+            if message.from_user and message.from_user.id == owner_id:
+                print(f"ℹ️ Владелец отвечает на фото - пропускаю (не View Once)")
+            else:
+                try:
+                    orig_msg_id = message.reply_to_message.message_id
+                    file_path = f"saved_media/{message.chat.id}_{orig_msg_id}_photo_reply.jpg"
+                    
+                    print(f"📸 ОБНАРУЖЕНО View Once фото от собеседника! Скачиваю: {file_path}")
+                    await bot.download(message.reply_to_message.photo[-1], destination=file_path)
+                    
+                    if not Path(file_path).exists():
+                        print(f"❌ Файл не был создан: {file_path}")
+                        return
+                    
+                    print(f"✅ Файл сохранён: {file_path}, размер: {Path(file_path).stat().st_size} байт")
+                    
+                    user_name = message.reply_to_message.from_user.first_name if message.reply_to_message.from_user else "Unknown"
+                    user_username = f" (@{message.reply_to_message.from_user.username})" if message.reply_to_message.from_user and message.reply_to_message.from_user.username else ""
+                    fancy_name = to_fancy(user_name)
+                    header = f"🔒 <b>View Once фото сохранено!</b>\n\n{fancy_name}{user_username} отправил(а) исчезающее фото"
+                    
+                    print(f"📤 Отправляю View Once фото владельцу {owner_id}")
+                    await bot.send_photo(owner_id, FSInputFile(file_path), caption=header, parse_mode="HTML")
+                    print(f"✅ View Once фото успешно отправлено {owner_id}")
+                    
+                    # Save to DB after successful send
+                    await save_message(owner_id, message.chat.id, orig_msg_id,
+                               message.reply_to_message.from_user.id if message.reply_to_message.from_user else None,
+                               "", media_type="photo_reply", file_path=file_path,
+                               caption=message.reply_to_message.caption)
+                except Exception as e:
+                    print(f"❌ Ошибка View Once фото: {e}")
+                    import traceback
+                    traceback.print_exc()
         
         # View Once video via reply - Business API doesn't set has_media_spoiler, so check just for video
         if message.reply_to_message and message.reply_to_message.video:
-            try:
-                orig_msg_id = message.reply_to_message.message_id
-                file_path = f"saved_media/{message.chat.id}_{orig_msg_id}_video_reply.mp4"
-                
-                print(f"🎥 Скачиваю View Once видео: {file_path}")
-                await bot.download(message.reply_to_message.video, destination=file_path)
-                
-                if not Path(file_path).exists():
-                    print(f"❌ Файл не был создан: {file_path}")
-                    return
-                
-                print(f"✅ Файл сохранён: {file_path}, размер: {Path(file_path).stat().st_size} байт")
-                
-                user_name = message.reply_to_message.from_user.first_name if message.reply_to_message.from_user else "Unknown"
-                user_username = f" (@{message.reply_to_message.from_user.username})" if message.reply_to_message.from_user and message.reply_to_message.from_user.username else ""
-                fancy_name = to_fancy(user_name)
-                header = f"🔒 <b>View Once видео сохранено!</b>\n\n{fancy_name}{user_username} отправил(а) исчезающее видео"
-                
-                print(f"📤 Отправляю View Once видео владельцу {owner_id}")
-                await bot.send_video(owner_id, FSInputFile(file_path), caption=header, parse_mode="HTML")
-                print(f"✅ View Once видео успешно отправлено {owner_id}")
-                
-                # Save to DB after successful send
-                await save_message(owner_id, message.chat.id, orig_msg_id,
-                           message.reply_to_message.from_user.id if message.reply_to_message.from_user else None,
-                           "", media_type="video_reply", file_path=file_path,
-                           caption=message.reply_to_message.caption)
-            except Exception as e:
-                print(f"❌ Ошибка View Once видео: {e}")
-                import traceback
-                traceback.print_exc()
+            # ВАЖНО: Отправлять только если это СОБЕСЕДНИК отвечает на видео, а не владелец
+            if message.from_user and message.from_user.id == owner_id:
+                print(f"ℹ️ Владелец отвечает на видео - пропускаю (не View Once)")
+            else:
+                try:
+                    orig_msg_id = message.reply_to_message.message_id
+                    file_path = f"saved_media/{message.chat.id}_{orig_msg_id}_video_reply.mp4"
+                    
+                    print(f"🎥 ОБНАРУЖЕНО View Once видео от собеседника! Скачиваю: {file_path}")
+                    await bot.download(message.reply_to_message.video, destination=file_path)
+                    
+                    if not Path(file_path).exists():
+                        print(f"❌ Файл не был создан: {file_path}")
+                        return
+                    
+                    print(f"✅ Файл сохранён: {file_path}, размер: {Path(file_path).stat().st_size} байт")
+                    
+                    user_name = message.reply_to_message.from_user.first_name if message.reply_to_message.from_user else "Unknown"
+                    user_username = f" (@{message.reply_to_message.from_user.username})" if message.reply_to_message.from_user and message.reply_to_message.from_user.username else ""
+                    fancy_name = to_fancy(user_name)
+                    header = f"🔒 <b>View Once видео сохранено!</b>\n\n{fancy_name}{user_username} отправил(а) исчезающее видео"
+                    
+                    print(f"📤 Отправляю View Once видео владельцу {owner_id}")
+                    await bot.send_video(owner_id, FSInputFile(file_path), caption=header, parse_mode="HTML")
+                    print(f"✅ View Once видео успешно отправлено {owner_id}")
+                    
+                    # Save to DB after successful send
+                    await save_message(owner_id, message.chat.id, orig_msg_id,
+                               message.reply_to_message.from_user.id if message.reply_to_message.from_user else None,
+                               "", media_type="video_reply", file_path=file_path,
+                               caption=message.reply_to_message.caption)
+                except Exception as e:
+                    print(f"❌ Ошибка View Once видео: {e}")
+                    import traceback
+                    traceback.print_exc()
         
         # ===== NOW check subscription for regular message processing =====
         sub_status = await check_subscription(owner_id)
