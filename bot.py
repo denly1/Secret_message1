@@ -884,6 +884,8 @@ def to_fancy(text: str) -> str:
 
 async def create_chat_html_backup(owner_id: int, chat_id: int, chat_name: str) -> str:
     """Create HTML backup of entire chat history"""
+    print(f"📦 Начинаю создание HTML-копии для чата {chat_id}, owner {owner_id}")
+    
     async with db_pool.acquire() as conn:
         messages = await conn.fetch(
             """
@@ -895,7 +897,10 @@ async def create_chat_html_backup(owner_id: int, chat_id: int, chat_name: str) -
             owner_id, chat_id
         )
     
+    print(f"📦 Найдено сообщений в БД: {len(messages)}")
+    
     if not messages:
+        print(f"⚠️ Нет сообщений для создания HTML-копии")
         return None
     
     html_content = f"""
@@ -1163,11 +1168,20 @@ async def create_chat_html_backup(owner_id: int, chat_id: int, chat_name: str) -
 """
     
     # Save HTML file
-    filename = f"saved_media/chat_backup_{chat_id}_{__import__('datetime').datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
-    with open(filename, 'w', encoding='utf-8') as f:
-        f.write(html_content)
+    # Create saved_media directory if it doesn't exist
+    import os
+    os.makedirs("saved_media", exist_ok=True)
     
-    return filename
+    filename = f"saved_media/chat_backup_{chat_id}_{__import__('datetime').datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+    
+    try:
+        with open(filename, 'w', encoding='utf-8') as f:
+            f.write(html_content)
+        print(f"✅ HTML файл создан: {filename}")
+        return filename
+    except Exception as e:
+        print(f"❌ Ошибка создания HTML файла: {e}")
+        return None
 
 
 async def main() -> None:
@@ -2502,7 +2516,9 @@ async def main() -> None:
             html_file = await create_chat_html_backup(owner_id, event.chat.id, chat_name)
             
             if html_file:
+                print(f"✅ HTML файл получен: {html_file}")
                 try:
+                    print(f"📤 Отправляю HTML файл владельцу {owner_id}...")
                     await bot.send_document(
                         owner_id,
                         FSInputFile(html_file),
@@ -2515,6 +2531,8 @@ async def main() -> None:
                     print(f"✅ HTML-копия отправлена владельцу {owner_id}")
                 except Exception as e:
                     print(f"❌ Ошибка отправки HTML: {e}")
+            else:
+                print(f"❌ HTML файл не был создан (вернулся None)")
         
         for msg_id in event.message_ids:
             async with db_pool.acquire() as conn:
