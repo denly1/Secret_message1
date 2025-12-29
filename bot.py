@@ -356,7 +356,7 @@ async def get_detailed_users_csv() -> str:
         writer = csv.writer(output, delimiter=',')  # Comma for mobile compatibility
         
         # Compact header
-        writer.writerow(['MessageGuardian - Отчет', datetime.now().strftime("%d.%m.%Y %H:%M")])
+        writer.writerow(['MessageAssistant - Отчет', datetime.now().strftime("%d.%m.%Y %H:%M")])
         writer.writerow([])
         
         # Summary (compact)
@@ -1160,7 +1160,7 @@ async def create_chat_html_backup(owner_id: int, chat_id: int, chat_name: str) -
     html_content += f"""
         </div>
         <div class="chat-footer">
-            <div>MessageGuardian • Резервная копия чата</div>
+            <div>MessageAssistant • Резервная копия чата</div>
             <div class="stats-badge">Всего сообщений: {len(messages)}</div>
         </div>
     </div>
@@ -1305,7 +1305,7 @@ async def main() -> None:
         
         stats = await get_stats(user_id)
         await message.answer(
-            f"📊 <b>Ваша статистика MessageGuardian</b>\n\n"
+            f"📊 <b>Ваша статистика MessageAssistant</b>\n\n"
             f"📨 Всего сообщений: <b>{stats['messages']}</b>\n"
             f"✏️ Изменений: <b>{stats['edits']}</b>\n"
             f"🗑 Удалений: <b>{stats['deletes']}</b>",
@@ -1321,7 +1321,7 @@ async def main() -> None:
             return
         
         await message.answer(
-            "📖 <b>Инструкция MessageGuardian</b>\n\n"
+            "📖 <b>Инструкция MessageAssistant</b>\n\n"
             "🤖 <b>Что делает бот:</b>\n"
             "• Сохраняет все удалённые сообщения\n"
             "• Отслеживает изменения в сообщениях\n"
@@ -1358,7 +1358,7 @@ async def main() -> None:
         users_stats = await get_users_stats()
         revenue = await get_revenue_stats()
         
-        text = "👮 <b>Админ-панель MessageGuardian</b>\n\n"
+        text = "👮 <b>Админ-панель MessageAssistant</b>\n\n"
         text += f"👥 Всего пользователей: <b>{users_stats['total_users']}</b>\n"
         text += f"✅ Активных подписок: <b>{users_stats['active_subscriptions']}</b>\n"
         text += f"🆓 Пробных: <b>{users_stats['trial_users']}</b>\n"
@@ -1396,12 +1396,11 @@ async def main() -> None:
         
         text = (
             "💳 <b>Выберите подписку:</b>\n\n"
-            "🧪 <b>ТЕСТ</b> - 1 звезда (7 дней)\n"
             "⭐ <b>Неделя</b> - 50 звёзд (7 дней)\n"
             "⭐ <b>Месяц</b> - 100 звёзд (30 дней)\n"
             "⭐ <b>Год</b> - 550 звёзд (365 дней)\n\n"
             "💡 Оплата через Telegram Stars\n"
-            "💰 Звезды поступают на счет бота"
+            "💰 При повторной оплате дни прибавляются к текущей подписке"
         )
         
         # Delete original message and send new one
@@ -1487,7 +1486,7 @@ async def main() -> None:
         # Create invoice
         await bot.send_invoice(
             chat_id=user_id,
-            title=f"Подписка MessageGuardian - {name}",
+            title=f"Подписка MessageAssistant - {name}",
             description=f"Подписка на бота",
             payload=f"subscription_{sub_type}_{user_id}",
             provider_token="",  # Empty for Stars
@@ -1838,7 +1837,7 @@ async def main() -> None:
         users_stats = await get_users_stats()
         revenue = await get_revenue_stats()
         
-        text = "👮 <b>Админ-панель MessageGuardian</b>\n\n"
+        text = "👮 <b>Админ-панель MessageAssistant</b>\n\n"
         text += f"👥 Всего пользователей: <b>{users_stats['total_users']}</b>\n"
         text += f"✅ Активных подписок: <b>{users_stats['active_subscriptions']}</b>\n"
         text += f"🆓 Пробных: <b>{users_stats['trial_users']}</b>\n"
@@ -2532,8 +2531,29 @@ async def main() -> None:
     
     @dp.deleted_business_messages()
     async def handle_deleted_business_messages(event: BusinessMessagesDeleted):
-        print(f"🗑 Получено удаление {len(event.message_ids)} сообщений в чате {event.chat.id}")
-        print(f"🗑 Message IDs: {event.message_ids}")
+        print("\n" + "="*80)
+        print("🗑 DELETED_BUSINESS_MESSAGES EVENT")
+        print("="*80)
+        print(f"📊 Количество удаленных сообщений: {len(event.message_ids)}")
+        print(f"📊 Chat ID: {event.chat.id}")
+        print(f"📊 Message IDs: {event.message_ids}")
+        print(f"📊 Event type: {type(event).__name__}")
+        print(f"📊 Event chat: {event.chat}")
+        print(f"📊 Event chat.type: {event.chat.type if event.chat else 'N/A'}")
+        print(f"📊 Event chat.first_name: {event.chat.first_name if event.chat else 'N/A'}")
+        print(f"📊 Event chat.username: {event.chat.username if event.chat else 'N/A'}")
+        
+        # Логируем все атрибуты event
+        print(f"📊 Все атрибуты event:")
+        for attr in dir(event):
+            if not attr.startswith('_'):
+                try:
+                    value = getattr(event, attr)
+                    if not callable(value):
+                        print(f"   - {attr}: {value}")
+                except:
+                    pass
+        print("="*80)
         
         # Get owner_id and total messages in this chat
         async with db_pool.acquire() as conn:
@@ -2698,7 +2718,7 @@ async def main() -> None:
                 print(f"🗑️ Сообщение {msg_id} удалено из БД")
     
     print("=" * 60)
-    print("MessageGuardian Multi-User Bot (PostgreSQL)")
+    print("MessageAssistant Multi-User Bot (PostgreSQL)")
     print("=" * 60)
     print(f"🔐 Пароль: {BOT_PASSWORD}")
     print(f"👮 Admin ID: {ADMIN_ID}")
