@@ -2320,7 +2320,46 @@ async def main() -> None:
     
     @dp.business_message()
     async def handle_business_message(message: Message):
-        print(f"📨 Получено business сообщение: chat_id={message.chat.id}, msg_id={message.message_id}")
+        print("\n" + "="*80)
+        print("📨 BUSINESS MESSAGE EVENT")
+        print("="*80)
+        print(f"📊 Chat ID: {message.chat.id}")
+        print(f"📊 Message ID: {message.message_id}")
+        print(f"📊 From user: {message.from_user.id if message.from_user else 'N/A'} ({message.from_user.first_name if message.from_user else 'N/A'})")
+        print(f"📊 Text: {message.text[:50] if message.text else 'N/A'}...")
+        print(f"📊 Caption: {message.caption[:50] if message.caption else 'N/A'}...")
+        
+        # МЕГА ЛОГИРОВАНИЕ МЕДИА
+        print(f"\n📷 PHOTO: {bool(message.photo)}")
+        if message.photo:
+            print(f"   - Количество размеров: {len(message.photo)}")
+            print(f"   - Последний размер file_id: {message.photo[-1].file_id}")
+            print(f"   - has_media_spoiler: {getattr(message, 'has_media_spoiler', 'N/A')}")
+        
+        print(f"\n🎥 VIDEO: {bool(message.video)}")
+        if message.video:
+            print(f"   - file_id: {message.video.file_id}")
+            print(f"   - has_media_spoiler: {getattr(message, 'has_media_spoiler', 'N/A')}")
+        
+        print(f"\n💬 REPLY_TO_MESSAGE: {bool(message.reply_to_message)}")
+        if message.reply_to_message:
+            print(f"   - Reply message_id: {message.reply_to_message.message_id}")
+            print(f"   - Reply from: {message.reply_to_message.from_user.id if message.reply_to_message.from_user else 'N/A'}")
+            print(f"   - Reply has photo: {bool(message.reply_to_message.photo)}")
+            if message.reply_to_message.photo:
+                print(f"   - Reply photo file_id: {message.reply_to_message.photo[-1].file_id}")
+                print(f"   - Reply has_media_spoiler: {getattr(message.reply_to_message, 'has_media_spoiler', 'N/A')}")
+            print(f"   - Reply has video: {bool(message.reply_to_message.video)}")
+            if message.reply_to_message.video:
+                print(f"   - Reply video file_id: {message.reply_to_message.video.file_id}")
+                print(f"   - Reply has_media_spoiler: {getattr(message.reply_to_message, 'has_media_spoiler', 'N/A')}")
+        
+        print(f"\n📄 Все атрибуты message:")
+        for attr in ['document', 'sticker', 'voice', 'video_note', 'animation', 'audio', 'contact', 'location']:
+            if hasattr(message, attr) and getattr(message, attr):
+                print(f"   - {attr}: {bool(getattr(message, attr))}")
+        
+        print("="*80 + "\n")
         
         # Get owner from business_connection
         owner_id = None
