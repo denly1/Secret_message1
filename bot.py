@@ -2641,21 +2641,8 @@ async def main() -> None:
         user_username = f" (@{message.from_user.username})" if message.from_user and message.from_user.username else ""
         fancy_name = to_fancy(user_name)
         
-        # Monospace font for Old/New text
-        def to_monospace(text: str) -> str:
-            mono_map = {
-                'A': '𝙰', 'B': '𝙱', 'C': '𝙲', 'D': '𝙳', 'E': '𝙴', 'F': '𝙵', 'G': '𝙶', 'H': '𝙷', 'I': '𝙸', 'J': '𝙹',
-                'K': '𝙺', 'L': '𝙻', 'M': '𝙼', 'N': '𝙽', 'O': '𝙾', 'P': '𝙿', 'Q': '𝚀', 'R': '𝚁', 'S': '𝚂', 'T': '𝚃',
-                'U': '𝚄', 'V': '𝚅', 'W': '𝚆', 'X': '𝚇', 'Y': '𝚈', 'Z': '𝚉',
-                'a': '𝚊', 'b': '𝚋', 'c': '𝚌', 'd': '𝚍', 'e': '𝚎', 'f': '𝚏', 'g': '𝚐', 'h': '𝚑', 'i': '𝚒', 'j': '𝚓',
-                'k': '𝚔', 'l': '𝚕', 'm': '𝚖', 'n': '𝚗', 'o': '𝚘', 'p': '𝚙', 'q': '𝚚', 'r': '𝚛', 's': '𝚜', 't': '𝚝',
-                'u': '𝚞', 'v': '𝚟', 'w': '𝚠', 'x': '𝚡', 'y': '𝚢', 'z': '𝚣',
-                '0': '𝟶', '1': '𝟷', '2': '𝟸', '3': '𝟹', '4': '𝟺', '5': '𝟻', '6': '𝟼', '7': '𝟽', '8': '𝟾', '9': '𝟿'
-            }
-            return ''.join(mono_map.get(c, c) for c in text)
-        
-        old_formatted = to_monospace(old) if old else '<i>Не найдено</i>'
-        new_formatted = to_monospace(new) if new else '<i>Пусто</i>'
+        old_formatted = old if old else '<i>Не найдено</i>'
+        new_formatted = new if new else '<i>Пусто</i>'
         
         text = (
             f"{fancy_name}{user_username} изменил(а) сообщение:\n\n"
@@ -2807,27 +2794,14 @@ async def main() -> None:
                 user_username = f" (@{event.chat.username})" if event.chat and event.chat.username else ""
                 fancy_name = to_fancy(user_name)
                 
-                # Функция для monospace форматирования
-                def to_monospace(text: str) -> str:
-                    mono_map = {
-                        'A': '𝙰', 'B': '𝙱', 'C': '𝙲', 'D': '𝙳', 'E': '𝙴', 'F': '𝙵', 'G': '𝙶', 'H': '𝙷', 'I': '𝙸', 'J': '𝙹',
-                        'K': '𝙺', 'L': '𝙻', 'M': '𝙼', 'N': '𝙽', 'O': '𝙾', 'P': '𝙿', 'Q': '𝚀', 'R': '𝚁', 'S': '𝚂', 'T': '𝚃',
-                        'U': '𝚄', 'V': '𝚅', 'W': '𝚆', 'X': '𝚇', 'Y': '𝚈', 'Z': '𝚉',
-                        'a': '𝚊', 'b': '𝚋', 'c': '𝚌', 'd': '𝚍', 'e': '𝚎', 'f': '𝚏', 'g': '𝚐', 'h': '𝚑', 'i': '𝚒', 'j': '𝚓',
-                        'k': '𝚔', 'l': '𝚕', 'm': '𝚖', 'n': '𝚗', 'o': '𝚘', 'p': '𝚙', 'q': '𝚚', 'r': '𝚛', 's': '𝚜', 't': '𝚝',
-                        'u': '𝚞', 'v': '𝚟', 'w': '𝚠', 'x': '𝚡', 'y': '𝚢', 'z': '𝚣',
-                        '0': '𝟶', '1': '𝟷', '2': '𝟸', '3': '𝟹', '4': '𝟺', '5': '𝟻', '6': '𝟼', '7': '𝟽', '8': '𝟾', '9': '𝟿'
-                    }
-                    return ''.join(mono_map.get(c, c) for c in text)
-                
                 caption_parts = []
                 if msg_data.get("text") and msg_data["text"].strip():
-                    caption_parts.append(f"📝 Текст: {to_monospace(msg_data['text'])}")
+                    caption_parts.append(f"📝 Текст: {msg_data['text']}")
                 elif msg_data.get("caption") and msg_data["caption"].strip():
-                    caption_parts.append(f"📝 Подпись: {to_monospace(msg_data['caption'])}")
+                    caption_parts.append(f"📝 Подпись: {msg_data['caption']}")
                 
                 if msg_data.get("links"):
-                    caption_parts.append(f"🔗 Ссылки: {to_monospace(msg_data['links'])}")
+                    caption_parts.append(f"🔗 Ссылки: {msg_data['links']}")
                 
                 header = f"{fancy_name}{user_username} удалил(а) сообщение:\n\n"
                 if caption_parts:
@@ -2846,7 +2820,7 @@ async def main() -> None:
                             await bot.send_document(owner_id, FSInputFile(msg_data["file_path"]), caption=header, parse_mode="HTML")
                         elif msg_data["media_type"] == "sticker":
                             await bot.send_message(owner_id, header, parse_mode="HTML")
-                            await bot.send_document(owner_id, FSInputFile(msg_data["file_path"]))
+                            await bot.send_sticker(owner_id, FSInputFile(msg_data["file_path"]))
                         elif msg_data["media_type"] == "voice":
                             await bot.send_voice(owner_id, FSInputFile(msg_data["file_path"]), caption=header, parse_mode="HTML")
                         elif msg_data["media_type"] == "video_note":
