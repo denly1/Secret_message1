@@ -892,20 +892,36 @@ def to_fancy(text: str) -> str:
     return ''.join(fancy_map.get(c, c) for c in text)
 
 
-async def create_chat_html_backup(owner_id: int, chat_id: int, chat_name: str) -> str:
-    """Create HTML backup of entire chat history"""
-    print(f"📦 Начинаю создание HTML-копии для чата {chat_id}, owner {owner_id}")
+async def create_chat_html_backup(owner_id: int, chat_id: int, chat_name: str, limit: int = None) -> str:
+    """Create HTML backup of chat history with optional message limit"""
+    print(f"📦 Начинаю создание HTML-копии для чата {chat_id}, owner {owner_id}, limit={limit}")
     
     async with db_pool.acquire() as conn:
-        messages = await conn.fetch(
-            """
-            SELECT message_id, user_id, text, caption, media_type, file_path, created_at
-            FROM messages
-            WHERE owner_id = $1 AND chat_id = $2
-            ORDER BY created_at ASC
-            """,
-            owner_id, chat_id
-        )
+        if limit:
+            # Get last N messages
+            messages = await conn.fetch(
+                """
+                SELECT message_id, user_id, text, caption, media_type, file_path, created_at
+                FROM messages
+                WHERE owner_id = $1 AND chat_id = $2
+                ORDER BY created_at DESC
+                LIMIT $3
+                """,
+                owner_id, chat_id, limit
+            )
+            # Reverse to show oldest first
+            messages = list(reversed(messages))
+        else:
+            # Get all messages
+            messages = await conn.fetch(
+                """
+                SELECT message_id, user_id, text, caption, media_type, file_path, created_at
+                FROM messages
+                WHERE owner_id = $1 AND chat_id = $2
+                ORDER BY created_at ASC
+                """,
+                owner_id, chat_id
+            )
     
     print(f"📦 Найдено сообщений в БД: {len(messages)}")
     
@@ -1364,79 +1380,94 @@ async def main() -> None:
             await message.answer("🔐 Сначала авторизуйтесь: /start")
             return
         
-        # Create keyboard with contact request button
-        keyboard = ReplyKeyboardMarkup(
-            keyboard=[
-                [KeyboardButton(text="📱 Выбрать чат с пользователем", request_contact=True)]
-            ],
-            resize_keyboard=True,
-            one_time_keyboard=True
-        )
+        # Get list of all chats from database
+        async with db_pool.acquire() as conn:
+            chats = await conn.fetch(
+                """
+                SELECT DISTINCT ON (chat_id) 
+                    chat_id,
+                    user_id,
+                    COUNT(*) OVER (PARTITION BY chat_id) as message_count
+                FROM messages 
+                WHERE owner_id = $1 AND user_id != $1
+                ORDER BY chat_id, created_at DESC
+                """,
+                user_id
+            )
         
-        await state.set_state(DuplicateStates.waiting_contact)
+        if not chats:
+            await message.answer(
+                "❌ У вас пока нет сохранённых переписок.\n\n"
+                "💬 Когда бот начнёт сохранять сообщения, вы сможете экспортировать их через эту команду."
+            )
+            return
+        
+        # Create inline keyboard with chat list
+        keyboard_buttons = []
+        for chat in chats[:10]:  # Limit to 10 chats
+            chat_id = chat['chat_id']
+            msg_count = chat['message_count']
+            
+            # Try to get chat name from Telegram
+            try:
+                chat_info = await bot.get_chat(chat_id)
+                chat_name = chat_info.first_name or "Unknown"
+                if chat_info.last_name:
+                    chat_name += f" {chat_info.last_name}"
+            except:
+                chat_name = f"Chat {chat_id}"
+            
+            keyboard_buttons.append([
+                InlineKeyboardButton(
+                    text=f"💬 {chat_name} ({msg_count} сооб.)",
+                    callback_data=f"export_chat_{chat_id}"
+                )
+            ])
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
+        
         await message.answer(
             "📋 <b>Экспорт переписки</b>\n\n"
-            "Нажмите кнопку ниже и выберите контакт пользователя, чью переписку вы хотите экспортировать.\n\n"
-            "После выбора контакта бот создаст HTML-файл со всей историей переписки.",
+            "Выберите чат, который хотите экспортировать:\n\n"
+            "📄 Бот создаст HTML-файл с последними 5000 сообщениями (включая удалённые)",
             parse_mode="HTML",
             reply_markup=keyboard
         )
     
-    @dp.message(DuplicateStates.waiting_contact, F.contact)
-    async def process_duplicate_contact(message: Message, state: FSMContext):
-        user_id = message.from_user.id
-        contact_user_id = message.contact.user_id
+    @dp.callback_query(F.data.startswith("export_chat_"))
+    async def callback_export_chat(callback: CallbackQuery):
+        user_id = callback.from_user.id
+        chat_id = int(callback.data.split("_")[2])
         
-        if not contact_user_id:
-            await message.answer(
-                "❌ Не удалось получить ID пользователя из контакта. Попробуйте снова.",
-                reply_markup=ReplyKeyboardRemove()
-            )
-            await state.clear()
-            return
+        await callback.answer("⏳ Создаю HTML-файл...")
+        await callback.message.edit_text("⏳ <b>Создаю HTML-файл с перепиской...</b>", parse_mode="HTML")
         
-        await state.clear()
-        
-        # Remove keyboard
-        await message.answer("⏳ Создаю HTML-файл с перепиской...", reply_markup=ReplyKeyboardRemove())
-        
-        # Get chat_id for this contact
-        async with db_pool.acquire() as conn:
-            # Find chat with this user
-            chat_row = await conn.fetchrow(
-                """
-                SELECT DISTINCT chat_id 
-                FROM messages 
-                WHERE owner_id = $1 AND user_id = $2
-                LIMIT 1
-                """,
-                user_id, contact_user_id
-            )
-            
-            if not chat_row:
-                await message.answer(
-                    "❌ Не найдено сообщений с этим пользователем.\n"
-                    "Возможно, у вас ещё не было переписки или все сообщения были удалены из базы."
-                )
-                return
-            
-            chat_id = chat_row['chat_id']
-        
-        # Get contact name
-        contact_name = message.contact.first_name or "Unknown"
-        if message.contact.last_name:
-            contact_name += f" {message.contact.last_name}"
-        
-        # Create HTML backup
+        # Get chat name
         try:
-            html_file = await create_chat_html_backup(user_id, chat_id, contact_name)
+            chat_info = await bot.get_chat(chat_id)
+            chat_name = chat_info.first_name or "Unknown"
+            if chat_info.last_name:
+                chat_name += f" {chat_info.last_name}"
+        except:
+            chat_name = f"Chat {chat_id}"
+        
+        # Create HTML backup with last 5000 messages
+        try:
+            html_file = await create_chat_html_backup(user_id, chat_id, chat_name, limit=5000)
             
             if html_file and Path(html_file).exists():
                 await bot.send_document(
                     user_id,
                     FSInputFile(html_file),
-                    caption=f"📋 <b>Полная переписка с {contact_name}</b>\n\n"
+                    caption=f"📋 <b>Полная переписка с {chat_name}</b>\n\n"
+                            f"📄 Последние 5000 сообщений (включая удалённые)\n"
                             f"Экспортировано: {datetime.now().strftime('%d.%m.%Y %H:%M')}",
+                    parse_mode="HTML"
+                )
+                
+                await callback.message.edit_text(
+                    "✅ <b>HTML-файл успешно создан!</b>\n\n"
+                    "📄 Файл отправлен вам в чат.",
                     parse_mode="HTML"
                 )
                 
@@ -1446,10 +1477,10 @@ async def main() -> None:
                 except:
                     pass
             else:
-                await message.answer("❌ Ошибка при создании HTML-файла.")
+                await callback.message.edit_text("❌ Ошибка при создании HTML-файла.")
         except Exception as e:
             print(f"❌ Ошибка экспорта переписки: {e}")
-            await message.answer(f"❌ Ошибка при экспорте: {e}")
+            await callback.message.edit_text(f"❌ Ошибка при экспорте: {e}")
     
     @dp.message(Command("admin"))
     async def cmd_admin(message: Message):
