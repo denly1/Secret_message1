@@ -339,7 +339,8 @@ async def get_detailed_users_csv() -> str:
                 s.is_active,
                 s.end_date,
                 COALESCE(SUM(ph.amount), 0) as total_spent,
-                COUNT(ph.id) as payments_count
+                COUNT(ph.payment_id) as payments_count,
+                EXISTS(SELECT 1 FROM business_connections bc WHERE bc.user_id = u.user_id) as has_business_connection
             FROM users u
             LEFT JOIN subscriptions s ON u.user_id = s.user_id
             LEFT JOIN payment_history ph ON u.user_id = ph.user_id AND ph.status = 'completed'
@@ -364,13 +365,13 @@ async def get_detailed_users_csv() -> str:
         writer.writerow(['СТАТИСТИКА'])
         writer.writerow(['Пользователей', total_users])
         writer.writerow(['Активных', active_subs])
-        writer.writerow(['Прибыль ⭐', total_revenue])
+        writer.writerow(['Прибыль ', total_revenue])
         writer.writerow(['Платежей', total_payments])
         writer.writerow(['Средний чек', f'{total_revenue/total_payments:.1f}' if total_payments > 0 else '0'])
         writer.writerow([])
         
         # Compact user table (mobile-friendly columns)
-        writer.writerow(['ID', 'Имя', 'Username', 'Подписка', 'Активна', 'Потрачено ⭐', 'Платежей'])
+        writer.writerow(['ID', 'Имя', 'Username', 'Подписка', 'Активна', 'Потрачено ', 'Платежей', 'Бот подключен'])
         
         for row in rows:
             writer.writerow([
@@ -380,7 +381,8 @@ async def get_detailed_users_csv() -> str:
                 row['subscription_type'] or 'trial',
                 '✓' if row['is_active'] else '✗',
                 row['total_spent'],
-                row['payments_count']
+                row['payments_count'],
+                '✅ Да' if row['has_business_connection'] else '❌ Нет'
             ])
         
         writer.writerow([])
@@ -1454,6 +1456,54 @@ async def main() -> None:
             pass
         
         await bot.send_message(callback.from_user.id, text, parse_mode="HTML", reply_markup=keyboard)
+        await callback.answer()
+    
+    @dp.callback_query(F.data.startswith("view_edit_"))
+    async def callback_view_edit(callback: CallbackQuery):
+        """Show subscription offer when trying to view edited message"""
+        bot_username = (await bot.get_me()).username
+        ref_link = f"https://t.me/{bot_username}?start={callback.from_user.id}"
+        
+        text = (
+            "😔 <b>Ваш пробный период использования бота подошел к концу</b>\n\n"
+            "😊 Пожалуйста, подключите Premium-статус, либо пригласите хотя бы 1 пользователя с Telegram Premium для продления пробного периода\n\n"
+            "👑 <b>Подключить Premium-статус:</b>\n"
+            "➡️ Нажмите кнопку ниже\n\n"
+            "🎁 <b>Для приглашения:</b>\n"
+            "➡️ Отправьте эту ссылку своим друзьям и знакомым:\n"
+            f"👉 <code>{ref_link}</code>"
+        )
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="👑 Подключить Premium", callback_data="buy_subscription")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_start")]
+        ])
+        
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+        await callback.answer()
+    
+    @dp.callback_query(F.data.startswith("view_delete_"))
+    async def callback_view_delete(callback: CallbackQuery):
+        """Show subscription offer when trying to view deleted message"""
+        bot_username = (await bot.get_me()).username
+        ref_link = f"https://t.me/{bot_username}?start={callback.from_user.id}"
+        
+        text = (
+            "😔 <b>Ваш пробный период использования бота подошел к концу</b>\n\n"
+            "😊 Пожалуйста, подключите Premium-статус, либо пригласите хотя бы 1 пользователя с Telegram Premium для продления пробного периода\n\n"
+            "👑 <b>Подключить Premium-статус:</b>\n"
+            "➡️ Нажмите кнопку ниже\n\n"
+            "🎁 <b>Для приглашения:</b>\n"
+            "➡️ Отправьте эту ссылку своим друзьям и знакомым:\n"
+            f"👉 <code>{ref_link}</code>"
+        )
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="👑 Подключить Premium", callback_data="buy_subscription")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_start")]
+        ])
+        
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
         await callback.answer()
     
     @dp.callback_query(F.data == "back_to_start")
@@ -2684,20 +2734,36 @@ async def main() -> None:
         user_username = f" (@{message.from_user.username})" if message.from_user and message.from_user.username else ""
         fancy_name = to_fancy(user_name)
         
-        old_formatted = old if old else '<i>Не найдено</i>'
-        new_formatted = new if new else '<i>Пусто</i>'
+        # Check subscription status
+        sub_status = await check_subscription(owner_id)
         
-        text = (
-            f"{fancy_name}{user_username} изменил(а) сообщение:\n\n"
-            f"<blockquote>Old:\n{old_formatted}</blockquote>\n\n"
-            f"<blockquote>New:\n{new_formatted}</blockquote>\n\n"
-            f"@MessageAssistantBot_bot"
-        )
-        
-        try:
-            await bot.send_message(owner_id, text, parse_mode="HTML")
-        except Exception as e:
-            print(f"❌ Ошибка отправки изменения: {e}")
+        if sub_status['active']:
+            # Full notification for active subscribers
+            old_formatted = old if old else '<i>Не найдено</i>'
+            new_formatted = new if new else '<i>Пусто</i>'
+            
+            text = (
+                f"{fancy_name}{user_username} изменил(а) сообщение:\n\n"
+                f"<blockquote>Old:\n{old_formatted}</blockquote>\n\n"
+                f"<blockquote>New:\n{new_formatted}</blockquote>\n\n"
+                f"@MessageAssistantBot_bot"
+            )
+            
+            try:
+                await bot.send_message(owner_id, text, parse_mode="HTML")
+            except Exception as e:
+                print(f"❌ Ошибка отправки изменения: {e}")
+        else:
+            # Limited notification for expired subscription
+            text = f"{fancy_name}{user_username} изменил(а) сообщение ✏️"
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="👁 Посмотреть", callback_data=f"view_edit_{message.chat.id}_{message.message_id}")]
+            ])
+            
+            try:
+                await bot.send_message(owner_id, text, parse_mode="HTML", reply_markup=keyboard)
+            except Exception as e:
+                print(f"❌ Ошибка отправки изменения: {e}")
     
     @dp.deleted_business_messages()
     async def handle_deleted_business_messages(event: BusinessMessagesDeleted):
@@ -2837,6 +2903,26 @@ async def main() -> None:
                 user_username = f" (@{event.chat.username})" if event.chat and event.chat.username else ""
                 fancy_name = to_fancy(user_name)
                 
+                # Check subscription status
+                sub_status = await check_subscription(owner_id)
+                
+                if not sub_status['active']:
+                    # Limited notification for expired subscription
+                    text = f"{fancy_name}{user_username} удалил(а) 1️⃣ сообщение 🗑️"
+                    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="👁 Посмотреть", callback_data=f"view_delete_{event.chat.id}_{msg_id}")]
+                    ])
+                    
+                    try:
+                        await bot.send_message(owner_id, text, parse_mode="HTML", reply_markup=keyboard)
+                    except Exception as e:
+                        print(f"❌ Ошибка отправки уведомления: {e}")
+                    
+                    await delete_message_from_db(owner_id, event.chat.id, msg_id)
+                    print(f"🗑️ Сообщение {msg_id} удалено из БД")
+                    continue
+                
+                # Full notification for active subscribers
                 caption_parts = []
                 if msg_data.get("text") and msg_data["text"].strip():
                     caption_parts.append(f"📝 Текст: {msg_data['text']}")
