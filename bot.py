@@ -5,7 +5,7 @@ from typing import Optional
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, BusinessMessagesDeleted, FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice, PreCheckoutQuery, CallbackQuery, BufferedInputFile
+from aiogram.types import Message, BusinessMessagesDeleted, FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice, PreCheckoutQuery, CallbackQuery, BufferedInputFile, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
 from aiogram.fsm.context import FSMContext
@@ -52,6 +52,10 @@ class AdminStates(StatesGroup):
     waiting_check_user_id = State()
     waiting_add_admin_id = State()
     waiting_remove_admin_id = State()
+
+# FSM States for duplicate command
+class DuplicateStates(StatesGroup):
+    waiting_contact = State()
 
 
 async def init_db():
@@ -353,6 +357,7 @@ async def get_detailed_users_csv() -> str:
         total_revenue = sum(row['total_spent'] for row in rows)
         total_payments = sum(row['payments_count'] for row in rows)
         active_subs = sum(1 for row in rows if row['is_active'])
+        connected_bots = sum(1 for row in rows if row['has_business_connection'])
         
         output = io.StringIO()
         writer = csv.writer(output, delimiter=',')  # Comma for mobile compatibility
@@ -365,7 +370,8 @@ async def get_detailed_users_csv() -> str:
         writer.writerow(['СТАТИСТИКА'])
         writer.writerow(['Пользователей', total_users])
         writer.writerow(['Активных', active_subs])
-        writer.writerow(['Прибыль ', total_revenue])
+        writer.writerow(['Бот подключен', connected_bots])
+        writer.writerow(['Прибыль ⭐', total_revenue])
         writer.writerow(['Платежей', total_payments])
         writer.writerow(['Средний чек', f'{total_revenue/total_payments:.1f}' if total_payments > 0 else '0'])
         writer.writerow([])
@@ -1343,11 +1349,107 @@ async def main() -> None:
             "📊 <b>Команды:</b>\n"
             "/start - главное меню\n"
             "/stats - статистика сообщений\n"
-            "/help - эта инструкция\n\n"
+            "/help - эта инструкция\n"
+            "/duplicate - экспорт полной переписки с пользователем\n\n"
             "⚠️ <b>Важно:</b>\n"
             "Бот работает только с вашими бизнес-чатами и автоматически удаляет данные из БД после отправки уведомления.",
             parse_mode="HTML"
         )
+    
+    @dp.message(Command("duplicate"))
+    async def cmd_duplicate(message: Message, state: FSMContext):
+        user_id = message.from_user.id
+        
+        if not await is_user_authenticated(user_id):
+            await message.answer("🔐 Сначала авторизуйтесь: /start")
+            return
+        
+        # Create keyboard with contact request button
+        keyboard = ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="📱 Выбрать чат с пользователем", request_contact=True)]
+            ],
+            resize_keyboard=True,
+            one_time_keyboard=True
+        )
+        
+        await state.set_state(DuplicateStates.waiting_contact)
+        await message.answer(
+            "📋 <b>Экспорт переписки</b>\n\n"
+            "Нажмите кнопку ниже и выберите контакт пользователя, чью переписку вы хотите экспортировать.\n\n"
+            "После выбора контакта бот создаст HTML-файл со всей историей переписки.",
+            parse_mode="HTML",
+            reply_markup=keyboard
+        )
+    
+    @dp.message(DuplicateStates.waiting_contact, F.contact)
+    async def process_duplicate_contact(message: Message, state: FSMContext):
+        user_id = message.from_user.id
+        contact_user_id = message.contact.user_id
+        
+        if not contact_user_id:
+            await message.answer(
+                "❌ Не удалось получить ID пользователя из контакта. Попробуйте снова.",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            await state.clear()
+            return
+        
+        await state.clear()
+        
+        # Remove keyboard
+        await message.answer("⏳ Создаю HTML-файл с перепиской...", reply_markup=ReplyKeyboardRemove())
+        
+        # Get chat_id for this contact
+        async with db_pool.acquire() as conn:
+            # Find chat with this user
+            chat_row = await conn.fetchrow(
+                """
+                SELECT DISTINCT chat_id 
+                FROM messages 
+                WHERE owner_id = $1 AND user_id = $2
+                LIMIT 1
+                """,
+                user_id, contact_user_id
+            )
+            
+            if not chat_row:
+                await message.answer(
+                    "❌ Не найдено сообщений с этим пользователем.\n"
+                    "Возможно, у вас ещё не было переписки или все сообщения были удалены из базы."
+                )
+                return
+            
+            chat_id = chat_row['chat_id']
+        
+        # Get contact name
+        contact_name = message.contact.first_name or "Unknown"
+        if message.contact.last_name:
+            contact_name += f" {message.contact.last_name}"
+        
+        # Create HTML backup
+        try:
+            html_file = await create_chat_html_backup(user_id, chat_id, contact_name)
+            
+            if html_file and Path(html_file).exists():
+                await bot.send_document(
+                    user_id,
+                    FSInputFile(html_file),
+                    caption=f"📋 <b>Полная переписка с {contact_name}</b>\n\n"
+                            f"Экспортировано: {datetime.now().strftime('%d.%m.%Y %H:%M')}",
+                    parse_mode="HTML"
+                )
+                
+                # Delete temp file
+                try:
+                    Path(html_file).unlink()
+                except:
+                    pass
+            else:
+                await message.answer("❌ Ошибка при создании HTML-файла.")
+        except Exception as e:
+            print(f"❌ Ошибка экспорта переписки: {e}")
+            await message.answer(f"❌ Ошибка при экспорте: {e}")
     
     @dp.message(Command("admin"))
     async def cmd_admin(message: Message):
@@ -2736,6 +2838,7 @@ async def main() -> None:
         
         # Check subscription status
         sub_status = await check_subscription(owner_id)
+        print(f"📊 Проверка подписки для owner_id={owner_id}: active={sub_status['active']}, type={sub_status.get('type')}")
         
         if sub_status['active']:
             # Full notification for active subscribers
@@ -2905,6 +3008,7 @@ async def main() -> None:
                 
                 # Check subscription status
                 sub_status = await check_subscription(owner_id)
+                print(f"📊 Проверка подписки для owner_id={owner_id}: active={sub_status['active']}, type={sub_status.get('type')}")
                 
                 if not sub_status['active']:
                     # Limited notification for expired subscription
