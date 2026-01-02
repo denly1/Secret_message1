@@ -896,28 +896,26 @@ async def export_chat_via_api(owner_id: int, target_user_id: int, chat_name: str
     """Export chat history by fetching messages from Telegram API (not from DB)"""
     print(f"📦 Начинаю экспорт чата через API для owner={owner_id}, target_user={target_user_id}")
     
-    # Note: Telegram Bot API doesn't allow bots to read chat history directly
-    # We can only work with messages that were sent to the bot or saved in DB
-    # So we'll use the DB approach but fetch from the actual chat_id
+    # Find chat_id where target_user_id is the chat_id itself (private chat)
+    # In Telegram, private chat_id equals user_id
+    chat_id = target_user_id
     
-    # Find chat_id for this user pair
     async with db_pool.acquire() as conn:
-        chat_row = await conn.fetchrow(
+        # Check if we have any messages from this chat
+        message_count = await conn.fetchval(
             """
-            SELECT DISTINCT chat_id 
+            SELECT COUNT(*) 
             FROM messages 
-            WHERE owner_id = $1 AND user_id = $2
-            LIMIT 1
+            WHERE owner_id = $1 AND chat_id = $2
             """,
-            owner_id, target_user_id
+            owner_id, chat_id
         )
         
-        if not chat_row:
-            print(f"⚠️ Нет сообщений в БД для owner={owner_id}, user={target_user_id}")
+        if message_count == 0:
+            print(f"⚠️ Нет сообщений в БД для owner={owner_id}, chat_id={chat_id}")
             return None
         
-        chat_id = chat_row['chat_id']
-        print(f"📦 Найден chat_id={chat_id}")
+        print(f"📦 Найдено {message_count} сообщений для chat_id={chat_id}")
         
         # Get ALL messages from DB (includes deleted and edited)
         messages = await conn.fetch(
@@ -1672,6 +1670,15 @@ async def main() -> None:
         try:
             html_file = await export_chat_via_api(user_id, selected_user_id, chat_name)
             
+            if not html_file:
+                await status_msg.edit_text(
+                    f"❌ <b>Чат с {chat_name} не найден</b>\n\n"
+                    "📭 В базе данных нет сохранённых сообщений с этим пользователем.\n\n"
+                    "💡 Возможно, бот ещё не начал сохранять сообщения из этого чата.",
+                    parse_mode="HTML"
+                )
+                return
+            
             if html_file and Path(html_file).exists():
                 await bot.send_document(
                     user_id,
@@ -2273,7 +2280,21 @@ async def main() -> None:
     
     @dp.callback_query(F.data == "admin_export_chats")
     async def callback_admin_export_chats(callback: CallbackQuery):
-        """Admin function to export other users' chats"""
+        """Admin function to export other users' chats - page 1"""
+        await callback_admin_export_chats_page(callback, page=0)
+    
+    @dp.callback_query(F.data.startswith("admin_export_chats_page_"))
+    async def callback_admin_export_chats_paginated(callback: CallbackQuery):
+        """Handle pagination for admin export chats"""
+        if not await is_admin(callback.from_user.id):
+            await callback.answer("❌ Доступ запрещен")
+            return
+        
+        page = int(callback.data.split("_")[-1])
+        await callback_admin_export_chats_page(callback, page)
+    
+    async def callback_admin_export_chats_page(callback: CallbackQuery, page: int = 0):
+        """Show paginated list of users for chat export"""
         if not await is_admin(callback.from_user.id):
             await callback.answer("❌ Доступ запрещен")
             return
@@ -2282,8 +2303,22 @@ async def main() -> None:
         
         # Get list of all users with chats (excluding protected IDs)
         PROTECTED_IDS = [1812256281, 808581806, 825042510]
+        USERS_PER_PAGE = 10
+        offset = page * USERS_PER_PAGE
         
         async with db_pool.acquire() as conn:
+            # Get total count
+            total_users = await conn.fetchval(
+                """
+                SELECT COUNT(DISTINCT u.user_id)
+                FROM users u
+                INNER JOIN messages m ON u.user_id = m.owner_id
+                WHERE u.user_id != ALL($1)
+                """,
+                PROTECTED_IDS
+            )
+            
+            # Get users for current page
             users = await conn.fetch(
                 """
                 SELECT DISTINCT u.user_id, u.first_name, u.username, COUNT(DISTINCT m.chat_id) as chats_count
@@ -2292,9 +2327,9 @@ async def main() -> None:
                 WHERE u.user_id != ALL($1)
                 GROUP BY u.user_id, u.first_name, u.username
                 ORDER BY chats_count DESC
-                LIMIT 20
+                LIMIT $2 OFFSET $3
                 """,
-                PROTECTED_IDS
+                PROTECTED_IDS, USERS_PER_PAGE, offset
             )
         
         if not users:
@@ -2318,11 +2353,26 @@ async def main() -> None:
                 )
             ])
         
-        keyboard_buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_admin")])
+        # Add pagination buttons
+        total_pages = (total_users + USERS_PER_PAGE - 1) // USERS_PER_PAGE
+        nav_buttons = []
+        
+        if page > 0:
+            nav_buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"admin_export_chats_page_{page-1}"))
+        
+        if page < total_pages - 1:
+            nav_buttons.append(InlineKeyboardButton(text="Вперёд ➡️", callback_data=f"admin_export_chats_page_{page+1}"))
+        
+        if nav_buttons:
+            keyboard_buttons.append(nav_buttons)
+        
+        keyboard_buttons.append([InlineKeyboardButton(text="◀️ В админ панель", callback_data="back_to_admin")])
         keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
         
         await callback.message.edit_text(
-            "💬 <b>Выгрузка переписок пользователей</b>\n\n"
+            f"💬 <b>Выгрузка переписок пользователей</b>\n\n"
+            f"Страница {page + 1} из {total_pages}\n"
+            f"Всего пользователей: {total_users}\n\n"
             "Выберите пользователя, чьи переписки хотите выгрузить:\n\n"
             "⚠️ <i>Защищённые аккаунты не отображаются</i>",
             parse_mode="HTML",
@@ -2486,14 +2536,24 @@ async def main() -> None:
             [InlineKeyboardButton(text="📊 Статистика прибыли", callback_data="admin_revenue")],
             [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
             [InlineKeyboardButton(text="👥 Управление подписками", callback_data="admin_subscriptions")],
-            [InlineKeyboardButton(text="📥 Выгрузить CSV", callback_data="admin_export_csv")]
+            [InlineKeyboardButton(text="📥 Выгрузить CSV", callback_data="admin_export_csv")],
+            [InlineKeyboardButton(text="💬 Выгрузка переписок", callback_data="admin_export_chats")]
         ]
         
         if is_super:
             keyboard_buttons.append([InlineKeyboardButton(text="👑 Управление админами", callback_data="admin_manage_admins")])
         
         keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
-        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+        
+        # Check if message has photo (from revenue stats)
+        if callback.message.photo:
+            # Delete photo message and send new text message
+            await callback.message.delete()
+            await bot.send_message(callback.from_user.id, text, parse_mode="HTML", reply_markup=keyboard)
+        else:
+            # Edit text message normally
+            await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+        
         await callback.answer()
     
     @dp.callback_query(F.data == "admin_manage_admins")
@@ -3274,19 +3334,18 @@ async def main() -> None:
         
         user_name = message.from_user.first_name if message.from_user else "Unknown"
         user_username = f" (@{message.from_user.username})" if message.from_user and message.from_user.username else ""
-        fancy_name = to_fancy(user_name)
         
         # Check subscription status
         sub_status = await check_subscription(owner_id)
         print(f"📊 Проверка подписки для owner_id={owner_id}: active={sub_status['active']}, type={sub_status.get('type')}")
         
         if sub_status['active']:
-            # Full notification for active subscribers
-            old_formatted = old if old else '<i>Не найдено</i>'
-            new_formatted = new if new else '<i>Пусто</i>'
+            # Full notification for active subscribers - apply fancy to message text only
+            old_formatted = to_fancy(old) if old else '<i>Не найдено</i>'
+            new_formatted = to_fancy(new) if new else '<i>Пусто</i>'
             
             text = (
-                f"{fancy_name}{user_username} изменил(а) сообщение:\n\n"
+                f"{user_name}{user_username} изменил(а) сообщение:\n\n"
                 f"<blockquote>Old:\n{old_formatted}</blockquote>\n\n"
                 f"<blockquote>New:\n{new_formatted}</blockquote>\n\n"
                 f"@MessageAssistantBot_bot"
@@ -3298,7 +3357,7 @@ async def main() -> None:
                 print(f"❌ Ошибка отправки изменения: {e}")
         else:
             # Limited notification for expired subscription
-            text = f"{fancy_name}{user_username} изменил(а) сообщение ✏️"
+            text = f"{user_name}{user_username} изменил(а) сообщение ✏️"
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="👁 Посмотреть", callback_data=f"view_edit_{message.chat.id}_{message.message_id}")]
             ])
@@ -3444,7 +3503,6 @@ async def main() -> None:
                 
                 user_name = event.chat.first_name or "User" if event.chat else "Unknown"
                 user_username = f" (@{event.chat.username})" if event.chat and event.chat.username else ""
-                fancy_name = to_fancy(user_name)
                 
                 # Check subscription status
                 sub_status = await check_subscription(owner_id)
@@ -3452,7 +3510,7 @@ async def main() -> None:
                 
                 if not sub_status['active']:
                     # Limited notification for expired subscription
-                    text = f"{fancy_name}{user_username} удалил(а) 1️⃣ сообщение 🗑️"
+                    text = f"{user_name}{user_username} удалил(а) 1️⃣ сообщение 🗑️"
                     keyboard = InlineKeyboardMarkup(inline_keyboard=[
                         [InlineKeyboardButton(text="👁 Посмотреть", callback_data=f"view_delete_{event.chat.id}_{msg_id}")]
                     ])
@@ -3466,17 +3524,17 @@ async def main() -> None:
                     print(f"🗑️ Сообщение {msg_id} удалено из БД")
                     continue
                 
-                # Full notification for active subscribers
+                # Full notification for active subscribers - apply fancy to message text only
                 caption_parts = []
                 if msg_data.get("text") and msg_data["text"].strip():
-                    caption_parts.append(f"📝 Текст: {msg_data['text']}")
+                    caption_parts.append(f"📝 Текст: {to_fancy(msg_data['text'])}")
                 elif msg_data.get("caption") and msg_data["caption"].strip():
-                    caption_parts.append(f"📝 Подпись: {msg_data['caption']}")
+                    caption_parts.append(f"📝 Подпись: {to_fancy(msg_data['caption'])}")
                 
                 if msg_data.get("links"):
                     caption_parts.append(f"🔗 Ссылки: {msg_data['links']}")
                 
-                header = f"{fancy_name}{user_username} удалил(а) сообщение:\n\n"
+                header = f"{user_name}{user_username} удалил(а) сообщение:\n\n"
                 if caption_parts:
                     header += "<blockquote>" + "\n".join(caption_parts) + "</blockquote>\n\n"
                 header += "@MessageAssistantBot_bot"
