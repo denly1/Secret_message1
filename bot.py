@@ -5,7 +5,7 @@ from typing import Optional
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, BusinessMessagesDeleted, FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice, PreCheckoutQuery, CallbackQuery, BufferedInputFile, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from aiogram.types import Message, BusinessMessagesDeleted, FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice, PreCheckoutQuery, CallbackQuery, BufferedInputFile, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, KeyboardButtonRequestUsers, UsersShared
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
 from aiogram.fsm.context import FSMContext
@@ -892,6 +892,195 @@ def to_fancy(text: str) -> str:
     return ''.join(fancy_map.get(c, c) for c in text)
 
 
+async def export_chat_via_api(owner_id: int, target_user_id: int, chat_name: str) -> str:
+    """Export chat history by fetching messages from Telegram API (not from DB)"""
+    print(f"📦 Начинаю экспорт чата через API для owner={owner_id}, target_user={target_user_id}")
+    
+    # Note: Telegram Bot API doesn't allow bots to read chat history directly
+    # We can only work with messages that were sent to the bot or saved in DB
+    # So we'll use the DB approach but fetch from the actual chat_id
+    
+    # Find chat_id for this user pair
+    async with db_pool.acquire() as conn:
+        chat_row = await conn.fetchrow(
+            """
+            SELECT DISTINCT chat_id 
+            FROM messages 
+            WHERE owner_id = $1 AND user_id = $2
+            LIMIT 1
+            """,
+            owner_id, target_user_id
+        )
+        
+        if not chat_row:
+            print(f"⚠️ Нет сообщений в БД для owner={owner_id}, user={target_user_id}")
+            return None
+        
+        chat_id = chat_row['chat_id']
+        print(f"📦 Найден chat_id={chat_id}")
+        
+        # Get last 5000 messages from DB (includes deleted and edited)
+        messages = await conn.fetch(
+            """
+            SELECT message_id, user_id, text, caption, media_type, file_path, created_at
+            FROM messages
+            WHERE owner_id = $1 AND chat_id = $2
+            ORDER BY created_at DESC
+            LIMIT 5000
+            """,
+            owner_id, chat_id
+        )
+        
+        # Reverse to show oldest first
+        messages = list(reversed(messages))
+    
+    print(f"📦 Найдено сообщений в БД: {len(messages)}")
+    
+    if not messages:
+        print(f"⚠️ Нет сообщений для экспорта")
+        return None
+    
+    # Create HTML file
+    html_content = f"""
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Экспорт чата - {chat_name}</title>
+    <style>
+        * {{
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #0f1419 0%, #1a1f2e 100%);
+            color: #ffffff;
+            min-height: 100vh;
+            padding: 0;
+        }}
+        .chat-container {{
+            max-width: 680px;
+            margin: 0 auto;
+            background: #0d1117;
+            min-height: 100vh;
+            box-shadow: 0 0 40px rgba(0,0,0,0.5);
+        }}
+        .chat-header {{
+            background: linear-gradient(90deg, #1e2936 0%, #2d3748 100%);
+            padding: 20px;
+            text-align: center;
+            border-bottom: 2px solid #30363d;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }}
+        .chat-header h1 {{
+            font-size: 24px;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }}
+        .chat-header p {{
+            color: #8b949e;
+            font-size: 14px;
+        }}
+        .messages {{
+            padding: 20px;
+        }}
+        .message {{
+            margin-bottom: 16px;
+            padding: 12px 16px;
+            background: #161b22;
+            border-radius: 8px;
+            border-left: 3px solid #58a6ff;
+        }}
+        .message-header {{
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+            font-size: 13px;
+        }}
+        .message-sender {{
+            color: #58a6ff;
+            font-weight: 600;
+        }}
+        .message-time {{
+            color: #8b949e;
+        }}
+        .message-content {{
+            color: #c9d1d9;
+            line-height: 1.5;
+            word-wrap: break-word;
+        }}
+        .message-media {{
+            margin-top: 8px;
+            padding: 8px;
+            background: #0d1117;
+            border-radius: 4px;
+            color: #58a6ff;
+            font-size: 12px;
+        }}
+    </style>
+</head>
+<body>
+    <div class="chat-container">
+        <div class="chat-header">
+            <h1>💬 Экспорт чата</h1>
+            <p>{chat_name} • {len(messages)} сообщений • {datetime.now().strftime('%d.%m.%Y %H:%M')}</p>
+        </div>
+        <div class="messages">
+"""
+    
+    for msg in messages:
+        sender = "Вы" if msg['user_id'] == owner_id else chat_name
+        timestamp = msg['created_at'].strftime('%d.%m.%Y %H:%M')
+        text = msg['text'] or msg['caption'] or ""
+        media_info = ""
+        
+        if msg['media_type']:
+            media_types = {
+                'photo': '📷 Фото',
+                'video': '🎥 Видео',
+                'document': '📄 Документ',
+                'sticker': '🎭 Стикер',
+                'voice': '🎤 Голосовое',
+                'video_note': '🎬 Видеосообщение',
+                'animation': '🎞 GIF'
+            }
+            media_info = f'<div class="message-media">{media_types.get(msg["media_type"], "📎 Медиа")}</div>'
+        
+        html_content += f"""
+            <div class="message">
+                <div class="message-header">
+                    <span class="message-sender">{sender}</span>
+                    <span class="message-time">{timestamp}</span>
+                </div>
+                <div class="message-content">{text if text else '<i>Медиа без подписи</i>'}</div>
+                {media_info}
+            </div>
+"""
+    
+    html_content += """
+        </div>
+    </div>
+</body>
+</html>
+"""
+    
+    # Save to file
+    filename = f"chat_export_{owner_id}_{target_user_id}_{int(datetime.now().timestamp())}.html"
+    filepath = Path("saved_media") / filename
+    filepath.parent.mkdir(exist_ok=True)
+    
+    with open(filepath, 'w', encoding='utf-8') as f:
+        f.write(html_content)
+    
+    print(f"✅ HTML-файл создан: {filepath}")
+    return str(filepath)
+
+
 async def create_chat_html_backup(owner_id: int, chat_id: int, chat_name: str, limit: int = None) -> str:
     """Create HTML backup of chat history with optional message limit"""
     print(f"📦 Начинаю создание HTML-копии для чата {chat_id}, owner {owner_id}, limit={limit}")
@@ -1305,7 +1494,7 @@ async def main() -> None:
         caption_text += f"<b>Доступные команды:</b>\n"
         caption_text += f"/stats - показать статистику\n"
         caption_text += f"/help - справка\n"
-        caption_text += f"/duplicate-дубликат чата"
+        caption_text += f"/duplicate - дубликат чата"
         
         # Send photo with caption and inline button
         try:
@@ -1321,6 +1510,47 @@ async def main() -> None:
             # Fallback to text message if photo fails
             await message.answer(caption_text, parse_mode="HTML", reply_markup=keyboard)
     
+    
+    @dp.message(Command("premium"))
+    async def cmd_premium(message: Message):
+        user_id = message.from_user.id
+        
+        if not await is_user_authenticated(user_id):
+            await message.answer("🔐 Сначала авторизуйтесь: /start")
+            return
+        
+        # Check current subscription
+        sub_status = await check_subscription(user_id)
+        
+        if sub_status['active']:
+            await message.answer(
+                f"✅ <b>У вас уже есть активная подписка!</b>\n\n"
+                f"📅 Тип: <b>{sub_status['type']}</b>\n"
+                f"⏰ Осталось дней: <b>{sub_status['days_left']}</b>",
+                parse_mode="HTML"
+            )
+            return
+        
+        # Show subscription offer
+        bot_username = (await bot.get_me()).username
+        ref_link = f"https://t.me/{bot_username}?start={user_id}"
+        
+        text = (
+            "😔 <b>Ваш пробный период использования бота подошел к концу</b>\n\n"
+            "😊 Пожалуйста, подключите Premium-статус, либо пригласите хотя бы 1 пользователя с Telegram Premium для продления пробного периода\n\n"
+            "👑 <b>Подключить Premium-статус:</b>\n"
+            "➡️ Нажмите кнопку ниже\n\n"
+            "🎁 <b>Для приглашения:</b>\n"
+            "➡️ Отправьте эту ссылку своим друзьям и знакомым:\n"
+            f"👉 <code>{ref_link}</code>"
+        )
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="👑 Подключить Premium", callback_data="buy_subscription")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_start")]
+        ])
+        
+        await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
     
     @dp.message(Command("stats"))
     async def cmd_stats(message: Message):
@@ -1381,92 +1611,79 @@ async def main() -> None:
             await message.answer("🔐 Сначала авторизуйтесь: /start")
             return
         
-        # Get list of all chats from database
-        async with db_pool.acquire() as conn:
-            chats = await conn.fetch(
-                """
-                SELECT DISTINCT ON (chat_id) 
-                    chat_id,
-                    user_id,
-                    COUNT(*) OVER (PARTITION BY chat_id) as message_count
-                FROM messages 
-                WHERE owner_id = $1 AND user_id != $1
-                ORDER BY chat_id, created_at DESC
-                """,
-                user_id
-            )
+        # Create keyboard with user selection button
+        keyboard = ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="📱 Выбрать чат с пользователем", request_users=KeyboardButtonRequestUsers(request_id=1, user_is_bot=False))]
+            ],
+            resize_keyboard=True,
+            one_time_keyboard=True
+        )
         
-        if not chats:
-            await message.answer(
-                "❌ У вас пока нет сохранённых переписок.\n\n"
-                "💬 Когда бот начнёт сохранять сообщения, вы сможете экспортировать их через эту команду."
-            )
-            return
-        
-        # Create inline keyboard with chat list
-        keyboard_buttons = []
-        for chat in chats[:10]:  # Limit to 10 chats
-            chat_id = chat['chat_id']
-            msg_count = chat['message_count']
-            
-            # Try to get chat name from Telegram
-            try:
-                chat_info = await bot.get_chat(chat_id)
-                chat_name = chat_info.first_name or "Unknown"
-                if chat_info.last_name:
-                    chat_name += f" {chat_info.last_name}"
-            except:
-                chat_name = f"Chat {chat_id}"
-            
-            keyboard_buttons.append([
-                InlineKeyboardButton(
-                    text=f"💬 {chat_name} ({msg_count} сооб.)",
-                    callback_data=f"export_chat_{chat_id}"
-                )
-            ])
-        
-        keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
-        
+        await state.set_state(DuplicateStates.waiting_contact)
         await message.answer(
             "📋 <b>Экспорт переписки</b>\n\n"
-            "Выберите чат, который хотите экспортировать:\n\n"
-            "📄 Бот создаст HTML-файл с последними 5000 сообщениями (включая удалённые)",
+            "Нажмите кнопку ниже и выберите пользователя, чью переписку вы хотите экспортировать.\n\n"
+            "📄 Бот просмотрит последние 5000 сообщений в чате (включая удалённые и изменённые) и создаст HTML-файл.",
             parse_mode="HTML",
             reply_markup=keyboard
         )
     
-    @dp.callback_query(F.data.startswith("export_chat_"))
-    async def callback_export_chat(callback: CallbackQuery):
-        user_id = callback.from_user.id
-        chat_id = int(callback.data.split("_")[2])
+    @dp.message(DuplicateStates.waiting_contact, F.users_shared)
+    async def process_duplicate_user_shared(message: Message, state: FSMContext):
+        user_id = message.from_user.id
         
-        await callback.answer("⏳ Создаю HTML-файл...")
-        await callback.message.edit_text("⏳ <b>Создаю HTML-файл с перепиской...</b>", parse_mode="HTML")
+        # Get selected user ID
+        if not message.users_shared or not message.users_shared.user_ids:
+            await message.answer(
+                "❌ Не удалось получить информацию о пользователе. Попробуйте снова.",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            await state.clear()
+            return
         
-        # Get chat name
+        selected_user_id = message.users_shared.user_ids[0]
+        await state.clear()
+        
+        # Remove keyboard
+        status_msg = await message.answer(
+            "⏳ <b>Получаю информацию о пользователе...</b>",
+            parse_mode="HTML",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        
+        # Get user info
         try:
-            chat_info = await bot.get_chat(chat_id)
-            chat_name = chat_info.first_name or "Unknown"
-            if chat_info.last_name:
-                chat_name += f" {chat_info.last_name}"
-        except:
-            chat_name = f"Chat {chat_id}"
+            user_info = await bot.get_chat(selected_user_id)
+            chat_name = user_info.first_name or "Unknown"
+            if user_info.last_name:
+                chat_name += f" {user_info.last_name}"
+        except Exception as e:
+            print(f"❌ Ошибка получения инфо: {e}")
+            chat_name = f"User {selected_user_id}"
         
-        # Create HTML backup with last 5000 messages
+        await status_msg.edit_text(
+            f"⏳ <b>Экспортирую переписку с {chat_name}...</b>\n\n"
+            "🔍 Просматриваю последние 5000 сообщений в чате...\n"
+            "⏳ Это может занять несколько минут...",
+            parse_mode="HTML"
+        )
+        
+        # Export chat history via Telegram API
         try:
-            html_file = await create_chat_html_backup(user_id, chat_id, chat_name, limit=5000)
+            html_file = await export_chat_via_api(user_id, selected_user_id, chat_name)
             
             if html_file and Path(html_file).exists():
                 await bot.send_document(
                     user_id,
                     FSInputFile(html_file),
                     caption=f"📋 <b>Полная переписка с {chat_name}</b>\n\n"
-                            f"📄 Последние 5000 сообщений (включая удалённые)\n"
+                            f"📄 Последние 5000 сообщений из реального чата\n"
                             f"Экспортировано: {datetime.now().strftime('%d.%m.%Y %H:%M')}",
                     parse_mode="HTML"
                 )
                 
-                await callback.message.edit_text(
+                await status_msg.edit_text(
                     "✅ <b>HTML-файл успешно создан!</b>\n\n"
                     "📄 Файл отправлен вам в чат.",
                     parse_mode="HTML"
@@ -1478,10 +1695,12 @@ async def main() -> None:
                 except:
                     pass
             else:
-                await callback.message.edit_text("❌ Ошибка при создании HTML-файла.")
+                await status_msg.edit_text("❌ Ошибка при создании HTML-файла.")
         except Exception as e:
             print(f"❌ Ошибка экспорта переписки: {e}")
-            await callback.message.edit_text(f"❌ Ошибка при экспорте: {e}")
+            import traceback
+            traceback.print_exc()
+            await status_msg.edit_text(f"❌ Ошибка при экспорте: {e}")
     
     @dp.message(Command("admin"))
     async def cmd_admin(message: Message):
