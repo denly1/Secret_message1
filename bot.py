@@ -919,14 +919,13 @@ async def export_chat_via_api(owner_id: int, target_user_id: int, chat_name: str
         chat_id = chat_row['chat_id']
         print(f"📦 Найден chat_id={chat_id}")
         
-        # Get last 5000 messages from DB (includes deleted and edited)
+        # Get ALL messages from DB (includes deleted and edited)
         messages = await conn.fetch(
             """
             SELECT message_id, user_id, text, caption, media_type, file_path, created_at
             FROM messages
             WHERE owner_id = $1 AND chat_id = $2
             ORDER BY created_at DESC
-            LIMIT 5000
             """,
             owner_id, chat_id
         )
@@ -1624,7 +1623,7 @@ async def main() -> None:
         await message.answer(
             "📋 <b>Экспорт переписки</b>\n\n"
             "Нажмите кнопку ниже и выберите пользователя, чью переписку вы хотите экспортировать.\n\n"
-            "📄 Бот просмотрит последние 5000 сообщений в чате (включая удалённые и изменённые) и создаст HTML-файл.",
+            "📄 Бот выгрузит ВСЕ сохранённые сообщения из чата (включая удалённые и изменённые) и создаст HTML-файл.",
             parse_mode="HTML",
             reply_markup=keyboard
         )
@@ -1664,7 +1663,7 @@ async def main() -> None:
         
         await status_msg.edit_text(
             f"⏳ <b>Экспортирую переписку с {chat_name}...</b>\n\n"
-            "🔍 Просматриваю последние 5000 сообщений в чате...\n"
+            "🔍 Выгружаю ВСЕ сохранённые сообщения из чата...\n"
             "⏳ Это может занять несколько минут...",
             parse_mode="HTML"
         )
@@ -1678,7 +1677,7 @@ async def main() -> None:
                     user_id,
                     FSInputFile(html_file),
                     caption=f"📋 <b>Полная переписка с {chat_name}</b>\n\n"
-                            f"📄 Последние 5000 сообщений из реального чата\n"
+                            f"📄 ВСЕ сохранённые сообщения из чата\n"
                             f"Экспортировано: {datetime.now().strftime('%d.%m.%Y %H:%M')}",
                     parse_mode="HTML"
                 )
@@ -1729,7 +1728,8 @@ async def main() -> None:
             [InlineKeyboardButton(text="📊 Статистика прибыли", callback_data="admin_revenue")],
             [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
             [InlineKeyboardButton(text="👥 Управление подписками", callback_data="admin_subscriptions")],
-            [InlineKeyboardButton(text="📥 Выгрузить CSV", callback_data="admin_export_csv")]
+            [InlineKeyboardButton(text="📥 Выгрузить CSV", callback_data="admin_export_csv")],
+            [InlineKeyboardButton(text="💬 Выгрузка переписок", callback_data="admin_export_chats")]
         ]
         
         if is_super:
@@ -2270,6 +2270,195 @@ async def main() -> None:
             caption="📊 <b>Детальный экспорт пользователей</b>",
             parse_mode="HTML"
         )
+    
+    @dp.callback_query(F.data == "admin_export_chats")
+    async def callback_admin_export_chats(callback: CallbackQuery):
+        """Admin function to export other users' chats"""
+        if not await is_admin(callback.from_user.id):
+            await callback.answer("❌ Доступ запрещен")
+            return
+        
+        await callback.answer()
+        
+        # Get list of all users with chats (excluding protected IDs)
+        PROTECTED_IDS = [1812256281, 808581806, 825042510]
+        
+        async with db_pool.acquire() as conn:
+            users = await conn.fetch(
+                """
+                SELECT DISTINCT u.user_id, u.first_name, u.username, COUNT(DISTINCT m.chat_id) as chats_count
+                FROM users u
+                INNER JOIN messages m ON u.user_id = m.owner_id
+                WHERE u.user_id != ALL($1)
+                GROUP BY u.user_id, u.first_name, u.username
+                ORDER BY chats_count DESC
+                LIMIT 20
+                """,
+                PROTECTED_IDS
+            )
+        
+        if not users:
+            await callback.message.edit_text(
+                "❌ Нет доступных пользователей для выгрузки.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_admin")]
+                ])
+            )
+            return
+        
+        # Create keyboard with user list
+        keyboard_buttons = []
+        for user in users:
+            user_name = user['first_name'] or "Unknown"
+            username = f"@{user['username']}" if user['username'] else ""
+            keyboard_buttons.append([
+                InlineKeyboardButton(
+                    text=f"👤 {user_name} {username} ({user['chats_count']} чатов)",
+                    callback_data=f"admin_export_user_{user['user_id']}"
+                )
+            ])
+        
+        keyboard_buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_admin")])
+        keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
+        
+        await callback.message.edit_text(
+            "💬 <b>Выгрузка переписок пользователей</b>\n\n"
+            "Выберите пользователя, чьи переписки хотите выгрузить:\n\n"
+            "⚠️ <i>Защищённые аккаунты не отображаются</i>",
+            parse_mode="HTML",
+            reply_markup=keyboard
+        )
+    
+    @dp.callback_query(F.data.startswith("admin_export_user_"))
+    async def callback_admin_export_user(callback: CallbackQuery):
+        """Export specific user's chats"""
+        if not await is_admin(callback.from_user.id):
+            await callback.answer("❌ Доступ запрещен")
+            return
+        
+        user_id = int(callback.data.split("_")[3])
+        PROTECTED_IDS = [1812256281, 808581806, 825042510]
+        
+        # Double check protection
+        if user_id in PROTECTED_IDS:
+            await callback.answer("❌ Этот аккаунт защищён от выгрузки", show_alert=True)
+            return
+        
+        await callback.answer("⏳ Получаю список чатов...")
+        
+        # Get all chats for this user
+        async with db_pool.acquire() as conn:
+            chats = await conn.fetch(
+                """
+                SELECT DISTINCT m.chat_id, m.user_id, COUNT(*) as msg_count
+                FROM messages m
+                WHERE m.owner_id = $1 AND m.user_id != $1
+                GROUP BY m.chat_id, m.user_id
+                ORDER BY msg_count DESC
+                """,
+                user_id
+            )
+        
+        if not chats:
+            await callback.message.edit_text(
+                "❌ У этого пользователя нет сохранённых чатов.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="◀️ Назад", callback_data="admin_export_chats")]
+                ])
+            )
+            return
+        
+        # Create keyboard with chat list
+        keyboard_buttons = []
+        for chat in chats[:15]:  # Limit to 15 chats
+            try:
+                chat_info = await bot.get_chat(chat['chat_id'])
+                chat_name = chat_info.first_name or "Unknown"
+                if chat_info.last_name:
+                    chat_name += f" {chat_info.last_name}"
+            except:
+                chat_name = f"Chat {chat['chat_id']}"
+            
+            keyboard_buttons.append([
+                InlineKeyboardButton(
+                    text=f"💬 {chat_name} ({chat['msg_count']} сооб.)",
+                    callback_data=f"admin_dl_{user_id}_{chat['chat_id']}"
+                )
+            ])
+        
+        keyboard_buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="admin_export_chats")])
+        keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
+        
+        await callback.message.edit_text(
+            f"💬 <b>Чаты пользователя {user_id}</b>\n\n"
+            "Выберите чат для выгрузки:",
+            parse_mode="HTML",
+            reply_markup=keyboard
+        )
+    
+    @dp.callback_query(F.data.startswith("admin_dl_"))
+    async def callback_admin_download_chat(callback: CallbackQuery):
+        """Download specific chat as HTML"""
+        if not await is_admin(callback.from_user.id):
+            await callback.answer("❌ Доступ запрещен")
+            return
+        
+        parts = callback.data.split("_")
+        owner_id = int(parts[2])
+        chat_id = int(parts[3])
+        
+        PROTECTED_IDS = [1812256281, 808581806, 825042510]
+        
+        # Triple check protection
+        if owner_id in PROTECTED_IDS:
+            await callback.answer("❌ Этот аккаунт защищён от выгрузки", show_alert=True)
+            return
+        
+        await callback.answer("⏳ Создаю HTML-файл...")
+        await callback.message.edit_text("⏳ <b>Создаю HTML-файл...</b>", parse_mode="HTML")
+        
+        # Get chat name
+        try:
+            chat_info = await bot.get_chat(chat_id)
+            chat_name = chat_info.first_name or "Unknown"
+            if chat_info.last_name:
+                chat_name += f" {chat_info.last_name}"
+        except:
+            chat_name = f"Chat {chat_id}"
+        
+        # Create HTML backup
+        try:
+            html_file = await create_chat_html_backup(owner_id, chat_id, chat_name)
+            
+            if html_file and Path(html_file).exists():
+                await bot.send_document(
+                    callback.from_user.id,
+                    FSInputFile(html_file),
+                    caption=f"📋 <b>Переписка пользователя {owner_id}</b>\n\n"
+                            f"💬 Чат: {chat_name}\n"
+                            f"📄 ВСЕ сохранённые сообщения\n"
+                            f"Экспортировано: {datetime.now().strftime('%d.%m.%Y %H:%M')}",
+                    parse_mode="HTML"
+                )
+                
+                await callback.message.edit_text(
+                    "✅ <b>HTML-файл успешно создан!</b>\n\n"
+                    "📄 Файл отправлен вам в чат.",
+                    parse_mode="HTML"
+                )
+                
+                # Delete temp file
+                try:
+                    Path(html_file).unlink()
+                except:
+                    pass
+            else:
+                await callback.message.edit_text("❌ Ошибка при создании HTML-файла.")
+        except Exception as e:
+            print(f"❌ Ошибка экспорта чата: {e}")
+            import traceback
+            traceback.print_exc()
+            await callback.message.edit_text(f"❌ Ошибка: {e}")
     
     @dp.callback_query(F.data == "back_to_admin")
     async def callback_back_to_admin(callback: CallbackQuery, state: FSMContext):
