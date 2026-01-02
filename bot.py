@@ -1304,7 +1304,8 @@ async def main() -> None:
         caption_text += f"🗑 Удалений: <b>{stats['deletes']}</b>\n\n"
         caption_text += f"<b>Доступные команды:</b>\n"
         caption_text += f"/stats - показать статистику\n"
-        caption_text += f"/help - справка"
+        caption_text += f"/help - справка\n"
+        caption_text += f"/duplicate-дубликат чата"
         
         # Send photo with caption and inline button
         try:
