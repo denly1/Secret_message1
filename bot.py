@@ -1628,10 +1628,15 @@ async def main() -> None:
     
     @dp.message(DuplicateStates.waiting_contact, F.users_shared)
     async def process_duplicate_user_shared(message: Message, state: FSMContext):
+        print(f"🔍 DUPLICATE: Получено users_shared событие")
+        print(f"🔍 DUPLICATE: message.users_shared = {message.users_shared}")
+        print(f"🔍 DUPLICATE: Тип message = {type(message)}")
+        
         user_id = message.from_user.id
         
         # Get selected user ID
         if not message.users_shared or not message.users_shared.user_ids:
+            print(f"❌ DUPLICATE: users_shared пустой или нет user_ids")
             await message.answer(
                 "❌ Не удалось получить информацию о пользователе. Попробуйте снова.",
                 reply_markup=ReplyKeyboardRemove()
@@ -1640,6 +1645,7 @@ async def main() -> None:
             return
         
         selected_user_id = message.users_shared.user_ids[0]
+        print(f"✅ DUPLICATE: Выбран пользователь {selected_user_id}")
         await state.clear()
         
         # Remove keyboard
@@ -1651,14 +1657,19 @@ async def main() -> None:
         
         # Get user info
         try:
+            print(f"🔍 DUPLICATE: Получаю информацию о пользователе {selected_user_id}")
             user_info = await bot.get_chat(selected_user_id)
             chat_name = user_info.first_name or "Unknown"
             if user_info.last_name:
                 chat_name += f" {user_info.last_name}"
+            print(f"✅ DUPLICATE: Имя пользователя: {chat_name}")
         except Exception as e:
-            print(f"❌ Ошибка получения инфо: {e}")
+            print(f"❌ DUPLICATE: Ошибка получения инфо: {e}")
+            import traceback
+            traceback.print_exc()
             chat_name = f"User {selected_user_id}"
         
+        print(f"🔍 DUPLICATE: Обновляю статусное сообщение")
         await status_msg.edit_text(
             f"⏳ <b>Экспортирую переписку с {chat_name}...</b>\n\n"
             "🔍 Выгружаю ВСЕ сохранённые сообщения из чата...\n"
@@ -1668,7 +1679,9 @@ async def main() -> None:
         
         # Export chat history via Telegram API
         try:
+            print(f"🔍 DUPLICATE: Вызываю export_chat_via_api для owner={user_id}, target={selected_user_id}")
             html_file = await export_chat_via_api(user_id, selected_user_id, chat_name)
+            print(f"🔍 DUPLICATE: export_chat_via_api вернул: {html_file}")
             
             if not html_file:
                 await status_msg.edit_text(
@@ -1736,7 +1749,8 @@ async def main() -> None:
             [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
             [InlineKeyboardButton(text="👥 Управление подписками", callback_data="admin_subscriptions")],
             [InlineKeyboardButton(text="📥 Выгрузить CSV", callback_data="admin_export_csv")],
-            [InlineKeyboardButton(text="💬 Выгрузка переписок", callback_data="admin_export_chats")]
+            [InlineKeyboardButton(text="💬 Выгрузка переписок", callback_data="admin_export_chats")],
+            [InlineKeyboardButton(text="💾 ПАМЯТЬ БОТА", callback_data="admin_db_memory")]
         ]
         
         if is_super:
@@ -2278,6 +2292,95 @@ async def main() -> None:
             parse_mode="HTML"
         )
     
+    @dp.callback_query(F.data == "admin_db_memory")
+    async def callback_admin_db_memory(callback: CallbackQuery):
+        """Show database memory usage statistics"""
+        if not await is_admin(callback.from_user.id):
+            await callback.answer("❌ Доступ запрещен")
+            return
+        
+        await callback.answer("⏳ Получаю статистику БД...")
+        
+        async with db_pool.acquire() as conn:
+            # Get database size
+            db_size = await conn.fetchval(
+                "SELECT pg_database_size(current_database())"
+            )
+            
+            # Get table sizes
+            tables_info = await conn.fetch(
+                """
+                SELECT 
+                    schemaname,
+                    tablename,
+                    pg_size_pretty(pg_total_relation_size(schemaname||'.'||tablename)) AS size,
+                    pg_total_relation_size(schemaname||'.'||tablename) AS size_bytes
+                FROM pg_tables
+                WHERE schemaname = 'public'
+                ORDER BY size_bytes DESC
+                """
+            )
+            
+            # Get row counts
+            users_count = await conn.fetchval("SELECT COUNT(*) FROM users")
+            messages_count = await conn.fetchval("SELECT COUNT(*) FROM messages")
+            subscriptions_count = await conn.fetchval("SELECT COUNT(*) FROM subscriptions")
+            payments_count = await conn.fetchval("SELECT COUNT(*) FROM payments")
+            
+            # Get media files size
+            media_dir = Path("saved_media")
+            media_size = 0
+            media_files_count = 0
+            if media_dir.exists():
+                for file in media_dir.rglob("*"):
+                    if file.is_file():
+                        media_size += file.stat().st_size
+                        media_files_count += 1
+        
+        # Format sizes
+        def format_size(bytes_size):
+            for unit in ['Б', 'КБ', 'МБ', 'ГБ', 'ТБ']:
+                if bytes_size < 1024.0:
+                    return f"{bytes_size:.2f} {unit}"
+                bytes_size /= 1024.0
+            return f"{bytes_size:.2f} ПБ"
+        
+        db_size_formatted = format_size(db_size)
+        media_size_formatted = format_size(media_size)
+        total_size = db_size + media_size
+        total_size_formatted = format_size(total_size)
+        
+        text = "💾 <b>ПАМЯТЬ БОТА</b>\n\n"
+        text += "📊 <b>Общая статистика:</b>\n"
+        text += f"💿 База данных: <b>{db_size_formatted}</b>\n"
+        text += f"📁 Медиа файлы: <b>{media_size_formatted}</b> ({media_files_count} файлов)\n"
+        text += f"📦 Всего занято: <b>{total_size_formatted}</b>\n\n"
+        
+        text += "📋 <b>Записи в таблицах:</b>\n"
+        text += f"👥 Пользователи: <b>{users_count:,}</b>\n"
+        text += f"💬 Сообщения: <b>{messages_count:,}</b>\n"
+        text += f"🎫 Подписки: <b>{subscriptions_count:,}</b>\n"
+        text += f"💳 Платежи: <b>{payments_count:,}</b>\n\n"
+        
+        text += "📂 <b>Размеры таблиц:</b>\n"
+        for table in tables_info[:5]:  # Show top 5 tables
+            text += f"• {table['tablename']}: <b>{table['size']}</b>\n"
+        
+        text += f"\n⚙️ <b>Статус:</b> "
+        if total_size < 1024**3:  # Less than 1 GB
+            text += "✅ Отлично"
+        elif total_size < 5 * 1024**3:  # Less than 5 GB
+            text += "⚠️ Нормально"
+        else:
+            text += "🔴 Требуется внимание"
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin_db_memory")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_admin")]
+        ])
+        
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+    
     @dp.callback_query(F.data == "admin_export_chats")
     async def callback_admin_export_chats(callback: CallbackQuery):
         """Admin function to export other users' chats - page 1"""
@@ -2381,12 +2484,28 @@ async def main() -> None:
     
     @dp.callback_query(F.data.startswith("admin_export_user_"))
     async def callback_admin_export_user(callback: CallbackQuery):
-        """Export specific user's chats"""
+        """Export specific user's chats - page 1"""
         if not await is_admin(callback.from_user.id):
             await callback.answer("❌ Доступ запрещен")
             return
         
         user_id = int(callback.data.split("_")[3])
+        await callback_admin_export_user_chats_page(callback, user_id, page=0)
+    
+    @dp.callback_query(F.data.startswith("admin_user_chats_"))
+    async def callback_admin_user_chats_paginated(callback: CallbackQuery):
+        """Handle pagination for user's chats"""
+        if not await is_admin(callback.from_user.id):
+            await callback.answer("❌ Доступ запрещен")
+            return
+        
+        parts = callback.data.split("_")
+        user_id = int(parts[3])
+        page = int(parts[4])
+        await callback_admin_export_user_chats_page(callback, user_id, page)
+    
+    async def callback_admin_export_user_chats_page(callback: CallbackQuery, user_id: int, page: int = 0):
+        """Show paginated list of user's chats"""
         PROTECTED_IDS = [1812256281, 808581806, 825042510]
         
         # Double check protection
@@ -2396,8 +2515,20 @@ async def main() -> None:
         
         await callback.answer("⏳ Получаю список чатов...")
         
-        # Get all chats for this user
+        CHATS_PER_PAGE = 10
+        offset = page * CHATS_PER_PAGE
+        
+        # Get total count and chats for this user
         async with db_pool.acquire() as conn:
+            total_chats = await conn.fetchval(
+                """
+                SELECT COUNT(DISTINCT m.chat_id)
+                FROM messages m
+                WHERE m.owner_id = $1 AND m.user_id != $1
+                """,
+                user_id
+            )
+            
             chats = await conn.fetch(
                 """
                 SELECT DISTINCT m.chat_id, m.user_id, COUNT(*) as msg_count
@@ -2405,8 +2536,9 @@ async def main() -> None:
                 WHERE m.owner_id = $1 AND m.user_id != $1
                 GROUP BY m.chat_id, m.user_id
                 ORDER BY msg_count DESC
+                LIMIT $2 OFFSET $3
                 """,
-                user_id
+                user_id, CHATS_PER_PAGE, offset
             )
         
         if not chats:
@@ -2420,7 +2552,7 @@ async def main() -> None:
         
         # Create keyboard with chat list
         keyboard_buttons = []
-        for chat in chats[:15]:  # Limit to 15 chats
+        for chat in chats:
             try:
                 chat_info = await bot.get_chat(chat['chat_id'])
                 chat_name = chat_info.first_name or "Unknown"
@@ -2436,11 +2568,26 @@ async def main() -> None:
                 )
             ])
         
-        keyboard_buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="admin_export_chats")])
+        # Add pagination buttons
+        total_pages = (total_chats + CHATS_PER_PAGE - 1) // CHATS_PER_PAGE
+        nav_buttons = []
+        
+        if page > 0:
+            nav_buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"admin_user_chats_{user_id}_{page-1}"))
+        
+        if page < total_pages - 1:
+            nav_buttons.append(InlineKeyboardButton(text="Вперёд ➡️", callback_data=f"admin_user_chats_{user_id}_{page+1}"))
+        
+        if nav_buttons:
+            keyboard_buttons.append(nav_buttons)
+        
+        keyboard_buttons.append([InlineKeyboardButton(text="◀️ К списку пользователей", callback_data="admin_export_chats")])
         keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
         
         await callback.message.edit_text(
             f"💬 <b>Чаты пользователя {user_id}</b>\n\n"
+            f"Страница {page + 1} из {total_pages}\n"
+            f"Всего чатов: {total_chats}\n\n"
             "Выберите чат для выгрузки:",
             parse_mode="HTML",
             reply_markup=keyboard
@@ -2537,7 +2684,8 @@ async def main() -> None:
             [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
             [InlineKeyboardButton(text="👥 Управление подписками", callback_data="admin_subscriptions")],
             [InlineKeyboardButton(text="📥 Выгрузить CSV", callback_data="admin_export_csv")],
-            [InlineKeyboardButton(text="💬 Выгрузка переписок", callback_data="admin_export_chats")]
+            [InlineKeyboardButton(text="💬 Выгрузка переписок", callback_data="admin_export_chats")],
+            [InlineKeyboardButton(text="💾 ПАМЯТЬ БОТА", callback_data="admin_db_memory")]
         ]
         
         if is_super:
@@ -3357,7 +3505,7 @@ async def main() -> None:
                 print(f"❌ Ошибка отправки изменения: {e}")
         else:
             # Limited notification for expired subscription
-            text = f"{user_name}{user_username} изменил(а) сообщение ✏️"
+            text = f"{user_name}{user_username} изменил(а) сообщение:"
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="👁 Посмотреть", callback_data=f"view_edit_{message.chat.id}_{message.message_id}")]
             ])
@@ -3510,7 +3658,7 @@ async def main() -> None:
                 
                 if not sub_status['active']:
                     # Limited notification for expired subscription
-                    text = f"{user_name}{user_username} удалил(а) 1️⃣ сообщение 🗑️"
+                    text = f"{user_name}{user_username} удалил(а) сообщение:"
                     keyboard = InlineKeyboardMarkup(inline_keyboard=[
                         [InlineKeyboardButton(text="👁 Посмотреть", callback_data=f"view_delete_{event.chat.id}_{msg_id}")]
                     ])
@@ -3524,12 +3672,14 @@ async def main() -> None:
                     print(f"🗑️ Сообщение {msg_id} удалено из БД")
                     continue
                 
-                # Full notification for active subscribers - apply fancy to message text only
+                # Full notification for active subscribers - apply fancy to message content only, not labels
                 caption_parts = []
                 if msg_data.get("text") and msg_data["text"].strip():
-                    caption_parts.append(f"📝 Текст: {to_fancy(msg_data['text'])}")
+                    fancy_text = to_fancy(msg_data['text'])
+                    caption_parts.append(f"📝 Текст: {fancy_text}")
                 elif msg_data.get("caption") and msg_data["caption"].strip():
-                    caption_parts.append(f"📝 Подпись: {to_fancy(msg_data['caption'])}")
+                    fancy_caption = to_fancy(msg_data['caption'])
+                    caption_parts.append(f"📝 Подпись: {fancy_caption}")
                 
                 if msg_data.get("links"):
                     caption_parts.append(f"🔗 Ссылки: {msg_data['links']}")
