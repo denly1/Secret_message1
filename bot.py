@@ -1669,13 +1669,24 @@ async def main() -> None:
             traceback.print_exc()
             chat_name = f"User {selected_user_id}"
         
-        print(f"🔍 DUPLICATE: Обновляю статусное сообщение")
-        await status_msg.edit_text(
-            f"⏳ <b>Экспортирую переписку с {chat_name}...</b>\n\n"
-            "🔍 Выгружаю ВСЕ сохранённые сообщения из чата...\n"
-            "⏳ Это может занять несколько минут...",
-            parse_mode="HTML"
-        )
+        # Delete status message before long operation to avoid timeout
+        try:
+            print(f"🔍 DUPLICATE: Удаляю статусное сообщение перед экспортом")
+            await status_msg.delete()
+        except Exception as e:
+            print(f"⚠️ DUPLICATE: Не удалось удалить статусное сообщение: {e}")
+        
+        # Send new message about export
+        try:
+            export_msg = await message.answer(
+                f"⏳ <b>Экспортирую переписку с {chat_name}...</b>\n\n"
+                "🔍 Выгружаю ВСЕ сохранённые сообщения из чата...\n"
+                "⏳ Это может занять несколько минут...",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            print(f"⚠️ DUPLICATE: Не удалось отправить сообщение об экспорте: {e}")
+            export_msg = None
         
         # Export chat history via Telegram API
         try:
@@ -1684,12 +1695,18 @@ async def main() -> None:
             print(f"🔍 DUPLICATE: export_chat_via_api вернул: {html_file}")
             
             if not html_file:
-                await status_msg.edit_text(
+                error_text = (
                     f"❌ <b>Чат с {chat_name} не найден</b>\n\n"
                     "📭 В базе данных нет сохранённых сообщений с этим пользователем.\n\n"
-                    "💡 Возможно, бот ещё не начал сохранять сообщения из этого чата.",
-                    parse_mode="HTML"
+                    "💡 Возможно, бот ещё не начал сохранять сообщения из этого чата."
                 )
+                if export_msg:
+                    try:
+                        await export_msg.edit_text(error_text, parse_mode="HTML")
+                    except:
+                        await message.answer(error_text, parse_mode="HTML")
+                else:
+                    await message.answer(error_text, parse_mode="HTML")
                 return
             
             if html_file and Path(html_file).exists():
@@ -1702,24 +1719,43 @@ async def main() -> None:
                     parse_mode="HTML"
                 )
                 
-                await status_msg.edit_text(
-                    "✅ <b>HTML-файл успешно создан!</b>\n\n"
-                    "📄 Файл отправлен вам в чат.",
-                    parse_mode="HTML"
-                )
+                # Delete export message
+                if export_msg:
+                    try:
+                        await export_msg.delete()
+                    except:
+                        pass
                 
-                # Delete temp file
+                # Clean up file
                 try:
                     Path(html_file).unlink()
                 except:
                     pass
             else:
-                await status_msg.edit_text("❌ Ошибка при создании HTML-файла.")
+                error_text = "❌ Не удалось создать HTML-файл. Попробуйте позже."
+                if export_msg:
+                    try:
+                        await export_msg.edit_text(error_text, parse_mode="HTML")
+                    except:
+                        await message.answer(error_text, parse_mode="HTML")
+                else:
+                    await message.answer(error_text, parse_mode="HTML")
         except Exception as e:
-            print(f"❌ Ошибка экспорта переписки: {e}")
+            print(f"❌ DUPLICATE: Ошибка экспорта: {e}")
             import traceback
             traceback.print_exc()
-            await status_msg.edit_text(f"❌ Ошибка при экспорте: {e}")
+            error_text = (
+                f"❌ <b>Ошибка при экспорте</b>\n\n"
+                f"Произошла ошибка: {str(e)}\n\n"
+                "Попробуйте позже."
+            )
+            try:
+                if export_msg:
+                    await export_msg.edit_text(error_text, parse_mode="HTML")
+                else:
+                    await message.answer(error_text, parse_mode="HTML")
+            except:
+                pass
     
     @dp.message(Command("admin"))
     async def cmd_admin(message: Message):
@@ -2325,7 +2361,18 @@ async def main() -> None:
             users_count = await conn.fetchval("SELECT COUNT(*) FROM users")
             messages_count = await conn.fetchval("SELECT COUNT(*) FROM messages")
             subscriptions_count = await conn.fetchval("SELECT COUNT(*) FROM subscriptions")
-            payments_count = await conn.fetchval("SELECT COUNT(*) FROM payments")
+            
+            # Check if payments table exists
+            payments_exists = await conn.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_schema = 'public' 
+                    AND table_name = 'payments'
+                )
+                """
+            )
+            payments_count = await conn.fetchval("SELECT COUNT(*) FROM payments") if payments_exists else 0
             
             # Get media files size
             media_dir = Path("saved_media")
@@ -2336,6 +2383,13 @@ async def main() -> None:
                     if file.is_file():
                         media_size += file.stat().st_size
                         media_files_count += 1
+            
+            # Get disk space
+            import shutil
+            disk_usage = shutil.disk_usage("/")
+            disk_total = disk_usage.total
+            disk_used = disk_usage.used
+            disk_free = disk_usage.free
         
         # Format sizes
         def format_size(bytes_size):
@@ -2350,11 +2404,21 @@ async def main() -> None:
         total_size = db_size + media_size
         total_size_formatted = format_size(total_size)
         
+        disk_total_formatted = format_size(disk_total)
+        disk_used_formatted = format_size(disk_used)
+        disk_free_formatted = format_size(disk_free)
+        disk_used_percent = (disk_used / disk_total) * 100
+        
         text = "💾 <b>ПАМЯТЬ БОТА</b>\n\n"
-        text += "📊 <b>Общая статистика:</b>\n"
+        text += "🖥 <b>Диск сервера:</b>\n"
+        text += f"💿 Всего: <b>{disk_total_formatted}</b>\n"
+        text += f"📊 Занято: <b>{disk_used_formatted}</b> ({disk_used_percent:.1f}%)\n"
+        text += f"✅ Свободно: <b>{disk_free_formatted}</b>\n\n"
+        
+        text += "📊 <b>Данные бота:</b>\n"
         text += f"💿 База данных: <b>{db_size_formatted}</b>\n"
         text += f"📁 Медиа файлы: <b>{media_size_formatted}</b> ({media_files_count} файлов)\n"
-        text += f"📦 Всего занято: <b>{total_size_formatted}</b>\n\n"
+        text += f"📦 Всего занято ботом: <b>{total_size_formatted}</b>\n\n"
         
         text += "📋 <b>Записи в таблицах:</b>\n"
         text += f"👥 Пользователи: <b>{users_count:,}</b>\n"
@@ -3485,10 +3549,11 @@ async def main() -> None:
         
         # Check subscription status
         sub_status = await check_subscription(owner_id)
-        print(f"📊 Проверка подписки для owner_id={owner_id}: active={sub_status['active']}, type={sub_status.get('type')}")
+        print(f"📊 EDIT: Проверка подписки для owner_id={owner_id}: active={sub_status['active']}, type={sub_status.get('type')}, days_left={sub_status.get('days_left')}")
         
         if sub_status['active']:
             # Full notification for active subscribers - apply fancy to message text only
+            print(f"✅ EDIT: Подписка активна - отправляю полное уведомление")
             old_formatted = to_fancy(old) if old else '<i>Не найдено</i>'
             new_formatted = to_fancy(new) if new else '<i>Пусто</i>'
             
@@ -3501,10 +3566,12 @@ async def main() -> None:
             
             try:
                 await bot.send_message(owner_id, text, parse_mode="HTML")
+                print(f"✅ EDIT: Полное уведомление отправлено")
             except Exception as e:
-                print(f"❌ Ошибка отправки изменения: {e}")
+                print(f"❌ EDIT: Ошибка отправки полного уведомления: {e}")
         else:
             # Limited notification for expired subscription
+            print(f"⚠️ EDIT: Подписка НЕактивна - отправляю краткое уведомление")
             text = f"{user_name}{user_username} изменил(а) сообщение:"
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="👁 Посмотреть", callback_data=f"view_edit_{message.chat.id}_{message.message_id}")]
@@ -3512,8 +3579,9 @@ async def main() -> None:
             
             try:
                 await bot.send_message(owner_id, text, parse_mode="HTML", reply_markup=keyboard)
+                print(f"✅ EDIT: Краткое уведомление отправлено")
             except Exception as e:
-                print(f"❌ Ошибка отправки изменения: {e}")
+                print(f"❌ EDIT: Ошибка отправки краткого уведомления: {e}")
     
     @dp.deleted_business_messages()
     async def handle_deleted_business_messages(event: BusinessMessagesDeleted):
@@ -3654,10 +3722,11 @@ async def main() -> None:
                 
                 # Check subscription status
                 sub_status = await check_subscription(owner_id)
-                print(f"📊 Проверка подписки для owner_id={owner_id}: active={sub_status['active']}, type={sub_status.get('type')}")
+                print(f"📊 DELETE: Проверка подписки для owner_id={owner_id}: active={sub_status['active']}, type={sub_status.get('type')}, days_left={sub_status.get('days_left')}")
                 
                 if not sub_status['active']:
                     # Limited notification for expired subscription
+                    print(f"⚠️ DELETE: Подписка НЕактивна - отправляю краткое уведомление")
                     text = f"{user_name}{user_username} удалил(а) сообщение:"
                     keyboard = InlineKeyboardMarkup(inline_keyboard=[
                         [InlineKeyboardButton(text="👁 Посмотреть", callback_data=f"view_delete_{event.chat.id}_{msg_id}")]
@@ -3665,12 +3734,16 @@ async def main() -> None:
                     
                     try:
                         await bot.send_message(owner_id, text, parse_mode="HTML", reply_markup=keyboard)
+                        print(f"✅ DELETE: Краткое уведомление отправлено")
                     except Exception as e:
-                        print(f"❌ Ошибка отправки уведомления: {e}")
+                        print(f"❌ DELETE: Ошибка отправки краткого уведомления: {e}")
                     
                     await delete_message_from_db(owner_id, event.chat.id, msg_id)
-                    print(f"🗑️ Сообщение {msg_id} удалено из БД")
+                    print(f"🗑️ DELETE: Сообщение {msg_id} удалено из БД")
                     continue
+                
+                # Full notification for active subscribers
+                print(f"✅ DELETE: Подписка активна - отправляю полное уведомление")
                 
                 # Full notification for active subscribers - apply fancy to message content only, not labels
                 caption_parts = []
