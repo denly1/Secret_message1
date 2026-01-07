@@ -28,6 +28,7 @@ MEDIA_DIR.mkdir(exist_ok=True)
 BOT_PASSWORD = os.getenv("BOT_PASSWORD", "12391")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "825042510"))
 SUPER_ADMIN_ID = 825042510  # Главный админ
+REQUIRED_CHANNEL = "@MessageAssistant"  # Обязательный канал для подписки
 
 # PostgreSQL connection
 DB_HOST = os.getenv("DB_HOST", "localhost")
@@ -880,6 +881,17 @@ async def get_user_by_connection(connection_id: str) -> Optional[int]:
         return user_id
 
 
+async def check_channel_subscription(bot: Bot, user_id: int) -> bool:
+    """Check if user is subscribed to required channel"""
+    try:
+        member = await bot.get_chat_member(chat_id=REQUIRED_CHANNEL, user_id=user_id)
+        # member.status can be: creator, administrator, member, restricted, left, kicked
+        return member.status in ["creator", "administrator", "member"]
+    except Exception as e:
+        print(f"❌ Ошибка проверки подписки на канал для user {user_id}: {e}")
+        return False
+
+
 def to_fancy(text: str) -> str:
     fancy_map = {
         'A': '𝓐', 'B': '𝓑', 'C': '𝓒', 'D': '𝓓', 'E': '𝓔', 'F': '𝓕', 'G': '𝓖', 'H': '𝓗', 'I': '𝓘', 'J': '𝓙',
@@ -1414,6 +1426,20 @@ async def main() -> None:
         username = message.from_user.username or "Unknown"
         first_name = message.from_user.first_name or "User"
         
+        # Check channel subscription first
+        is_subscribed = await check_channel_subscription(bot, user_id)
+        if not is_subscribed:
+            text = (
+                f"📢 <b>Требуется подписка на канал!</b>\n\n"
+                f"Для использования бота необходимо подписаться на наш канал: {REQUIRED_CHANNEL}\n\n"
+                f"После подписки нажмите /start снова."
+            )
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📢 Подписаться на канал", url=f"https://t.me/{REQUIRED_CHANNEL.replace('@', '')}")]
+            ])
+            await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
+            return
+        
         # Check for referral code in /start command
         referrer_id = None
         if len(message.text.split()) > 1:
@@ -1516,6 +1542,20 @@ async def main() -> None:
             await message.answer("🔐 Сначала авторизуйтесь: /start")
             return
         
+        # Check channel subscription
+        is_subscribed = await check_channel_subscription(bot, user_id)
+        if not is_subscribed:
+            text = (
+                f"📢 <b>Требуется подписка на канал!</b>\n\n"
+                f"Для использования бота необходимо подписаться на наш канал: {REQUIRED_CHANNEL}\n\n"
+                f"После подписки нажмите /start снова."
+            )
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📢 Подписаться на канал", url=f"https://t.me/{REQUIRED_CHANNEL.replace('@', '')}")]
+            ])
+            await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
+            return
+        
         # Check current subscription
         sub_status = await check_subscription(user_id)
         
@@ -1557,6 +1597,20 @@ async def main() -> None:
             await message.answer("🔐 Сначала авторизуйтесь: /start")
             return
         
+        # Check channel subscription
+        is_subscribed = await check_channel_subscription(bot, user_id)
+        if not is_subscribed:
+            text = (
+                f"📢 <b>Требуется подписка на канал!</b>\n\n"
+                f"Для использования бота необходимо подписаться на наш канал: {REQUIRED_CHANNEL}\n\n"
+                f"После подписки нажмите /start снова."
+            )
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📢 Подписаться на канал", url=f"https://t.me/{REQUIRED_CHANNEL.replace('@', '')}")]
+            ])
+            await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
+            return
+        
         stats = await get_stats(user_id)
         await message.answer(
             f"📊 <b>Ваша статистика MessageAssistant</b>\n\n"
@@ -1572,6 +1626,20 @@ async def main() -> None:
         
         if not await is_user_authenticated(user_id):
             await message.answer("🔐 Сначала авторизуйтесь: /start")
+            return
+        
+        # Check channel subscription
+        is_subscribed = await check_channel_subscription(bot, user_id)
+        if not is_subscribed:
+            text = (
+                f"📢 <b>Требуется подписка на канал!</b>\n\n"
+                f"Для использования бота необходимо подписаться на наш канал: {REQUIRED_CHANNEL}\n\n"
+                f"После подписки нажмите /start снова."
+            )
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📢 Подписаться на канал", url=f"https://t.me/{REQUIRED_CHANNEL.replace('@', '')}")]
+            ])
+            await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
             return
         
         await message.answer(
@@ -1606,6 +1674,20 @@ async def main() -> None:
         
         if not await is_user_authenticated(user_id):
             await message.answer("🔐 Сначала авторизуйтесь: /start")
+            return
+        
+        # Check channel subscription
+        is_subscribed = await check_channel_subscription(bot, user_id)
+        if not is_subscribed:
+            text = (
+                f"📢 <b>Требуется подписка на канал!</b>\n\n"
+                f"Для использования бота необходимо подписаться на наш канал: {REQUIRED_CHANNEL}\n\n"
+                f"После подписки нажмите /start снова."
+            )
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📢 Подписаться на канал", url=f"https://t.me/{REQUIRED_CHANNEL.replace('@', '')}")]
+            ])
+            await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
             return
         
         # Create keyboard with user selection button
@@ -3535,6 +3617,31 @@ async def main() -> None:
         if message.from_user and message.from_user.id == owner_id:
             return
         
+        # Check channel subscription
+        is_subscribed = await check_channel_subscription(bot, owner_id)
+        if not is_subscribed:
+            print(f"⚠️ EDIT: Пользователь {owner_id} не подписан на канал {REQUIRED_CHANNEL}")
+            user_name = message.from_user.first_name if message.from_user else "Unknown"
+            user_username = f" (@{message.from_user.username})" if message.from_user and message.from_user.username else ""
+            
+            text = (
+                f"📢 <b>Требуется подписка на канал!</b>\n\n"
+                f"{user_name}{user_username} изменил(а) сообщение.\n\n"
+                f"⚠️ Чтобы просматривать изменённые и удалённые сообщения, \n"
+                f"подпишитесь на наш канал: {REQUIRED_CHANNEL}\n\n"
+                f"После подписки бот продолжит работу автоматически."
+            )
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📢 Подписаться на канал", url=f"https://t.me/{REQUIRED_CHANNEL.replace('@', '')}")] 
+            ])
+            
+            try:
+                await bot.send_message(owner_id, text, parse_mode="HTML", reply_markup=keyboard)
+                print(f"✅ EDIT: Отправлено уведомление о необходимости подписки")
+            except Exception as e:
+                print(f"❌ EDIT: Ошибка отправки уведомления о подписке: {e}")
+            return
+        
         old_data = await get_message_full(owner_id, message.chat.id, message.message_id)
         old = old_data["text"] if old_data else None
         new = message.text or message.caption or ""
@@ -3714,6 +3821,33 @@ async def main() -> None:
                     continue
                 
                 print(f"🔔 Это сообщение собеседника - отправляю уведомление!")
+                
+                # Check channel subscription
+                is_subscribed = await check_channel_subscription(bot, owner_id)
+                if not is_subscribed:
+                    print(f"⚠️ DELETE: Пользователь {owner_id} не подписан на канал {REQUIRED_CHANNEL}")
+                    user_name = event.chat.first_name or "User" if event.chat else "Unknown"
+                    user_username = f" (@{event.chat.username})" if event.chat and event.chat.username else ""
+                    
+                    text = (
+                        f"📢 <b>Требуется подписка на канал!</b>\n\n"
+                        f"{user_name}{user_username} удалил(а) сообщение.\n\n"
+                        f"⚠️ Чтобы просматривать изменённые и удалённые сообщения, \n"
+                        f"подпишитесь на наш канал: {REQUIRED_CHANNEL}\n\n"
+                        f"После подписки бот продолжит работу автоматически."
+                    )
+                    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="📢 Подписаться на канал", url=f"https://t.me/{REQUIRED_CHANNEL.replace('@', '')}")]
+                    ])
+                    
+                    try:
+                        await bot.send_message(owner_id, text, parse_mode="HTML", reply_markup=keyboard)
+                        print(f"✅ DELETE: Отправлено уведомление о необходимости подписки")
+                    except Exception as e:
+                        print(f"❌ DELETE: Ошибка отправки уведомления о подписке: {e}")
+                    
+                    await delete_message_from_db(owner_id, event.chat.id, msg_id)
+                    continue
                 
                 await increment_stat(owner_id, "total_deletes")
                 
