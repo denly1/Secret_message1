@@ -949,14 +949,14 @@ async def export_chat_via_api(owner_id: int, target_user_id: int, chat_name: str
         print(f"⚠️ Нет сообщений для экспорта")
         return None
     
-    # Create HTML file
+    # Create HTML file with Telegram-style design
     html_content = f"""
 <!DOCTYPE html>
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Экспорт чата - {chat_name}</title>
+    <title>💬 {chat_name} - Telegram Chat Export</title>
     <style>
         * {{
             margin: 0;
@@ -964,114 +964,301 @@ async def export_chat_via_api(owner_id: int, target_user_id: int, chat_name: str
             box-sizing: border-box;
         }}
         body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-            background: linear-gradient(135deg, #0f1419 0%, #1a1f2e 100%);
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: #0E1621;
+            background-image: 
+                radial-gradient(at 40% 20%, rgba(102, 126, 234, 0.15) 0px, transparent 50%),
+                radial-gradient(at 80% 0%, rgba(118, 75, 162, 0.15) 0px, transparent 50%),
+                radial-gradient(at 0% 50%, rgba(79, 172, 254, 0.1) 0px, transparent 50%);
             color: #ffffff;
             min-height: 100vh;
             padding: 0;
+            overflow-x: hidden;
         }}
         .chat-container {{
-            max-width: 680px;
+            max-width: 750px;
             margin: 0 auto;
-            background: #0d1117;
+            background: rgba(13, 17, 23, 0.95);
             min-height: 100vh;
-            box-shadow: 0 0 40px rgba(0,0,0,0.5);
+            box-shadow: 0 0 60px rgba(0,0,0,0.6), 0 0 100px rgba(102, 126, 234, 0.1);
+            backdrop-filter: blur(20px);
         }}
         .chat-header {{
-            background: linear-gradient(90deg, #1e2936 0%, #2d3748 100%);
-            padding: 20px;
-            text-align: center;
-            border-bottom: 2px solid #30363d;
+            background: linear-gradient(135deg, #1a1f2e 0%, #2d3748 100%);
+            padding: 20px 24px;
+            border-bottom: 1px solid rgba(102, 126, 234, 0.2);
+            display: flex;
+            align-items: center;
+            gap: 16px;
             position: sticky;
             top: 0;
             z-index: 100;
+            backdrop-filter: blur(20px);
+            box-shadow: 0 2px 10px rgba(0,0,0,0.3);
         }}
-        .chat-header h1 {{
-            font-size: 24px;
-            font-weight: 600;
-            margin-bottom: 8px;
-        }}
-        .chat-header p {{
-            color: #8b949e;
-            font-size: 14px;
-        }}
-        .messages {{
-            padding: 20px;
-        }}
-        .message {{
-            margin-bottom: 16px;
-            padding: 12px 16px;
-            background: #161b22;
-            border-radius: 8px;
-            border-left: 3px solid #58a6ff;
-        }}
-        .message-header {{
+        .chat-avatar {{
+            width: 48px;
+            height: 48px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             display: flex;
-            justify-content: space-between;
-            margin-bottom: 8px;
-            font-size: 13px;
+            align-items: center;
+            justify-content: center;
+            font-size: 22px;
+            font-weight: 700;
+            color: white;
+            flex-shrink: 0;
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+            border: 2px solid rgba(255,255,255,0.1);
         }}
-        .message-sender {{
-            color: #58a6ff;
+        .chat-info {{
+            flex: 1;
+        }}
+        .chat-name {{
+            font-size: 17px;
             font-weight: 600;
+            color: #ffffff;
+            margin-bottom: 3px;
+            letter-spacing: 0.3px;
         }}
-        .message-time {{
+        .chat-status {{
+            font-size: 13px;
             color: #8b949e;
+            display: flex;
+            align-items: center;
+            gap: 6px;
         }}
-        .message-content {{
-            color: #c9d1d9;
-            line-height: 1.5;
+        .status-dot {{
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: #667eea;
+            animation: pulse 2s infinite;
+        }}
+        @keyframes pulse {{
+            0%, 100% {{ opacity: 1; }}
+            50% {{ opacity: 0.5; }}
+        }}
+        .messages-container {{
+            padding: 24px 16px;
+            background: transparent;
+        }}
+        .message-wrapper {{
+            display: flex;
+            margin-bottom: 8px;
+            align-items: flex-end;
+            gap: 10px;
+            animation: slideIn 0.3s ease-out;
+        }}
+        @keyframes slideIn {{
+            from {{
+                opacity: 0;
+                transform: translateY(10px);
+            }}
+            to {{
+                opacity: 1;
+                transform: translateY(0);
+            }}
+        }}
+        .message-wrapper.outgoing {{
+            flex-direction: row-reverse;
+        }}
+        .message-avatar {{
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 15px;
+            font-weight: 700;
+            color: white;
+            flex-shrink: 0;
+            box-shadow: 0 2px 8px rgba(240, 147, 251, 0.3);
+            border: 2px solid rgba(255,255,255,0.15);
+        }}
+        .message-wrapper.outgoing .message-avatar {{
+            background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+            box-shadow: 0 2px 8px rgba(79, 172, 254, 0.3);
+        }}
+        .message-bubble {{
+            max-width: 70%;
+            padding: 12px 16px;
+            border-radius: 20px;
+            position: relative;
             word-wrap: break-word;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+            transition: transform 0.2s;
+        }}
+        .message-bubble:hover {{
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+        }}
+        .message-wrapper.incoming .message-bubble {{
+            background: linear-gradient(135deg, #2d3748 0%, #1e2936 100%);
+            border-bottom-left-radius: 6px;
+            border: 1px solid rgba(255,255,255,0.05);
+        }}
+        .message-wrapper.outgoing .message-bubble {{
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-bottom-right-radius: 6px;
+            border: 1px solid rgba(255,255,255,0.1);
+        }}
+        .message-text {{
+            font-size: 15px;
+            line-height: 1.5;
+            color: #ffffff;
+            margin-bottom: 6px;
+            word-break: break-word;
+        }}
+        .message-text:empty {{
+            display: none;
         }}
         .message-media {{
-            margin-top: 8px;
-            padding: 8px;
-            background: #0d1117;
-            border-radius: 4px;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 14px;
+            background: rgba(255,255,255,0.12);
+            border-radius: 14px;
+            font-size: 13px;
+            margin-bottom: 8px;
+            color: #58a6ff;
+            font-weight: 500;
+            border: 1px solid rgba(255,255,255,0.08);
+        }}
+        .message-time {{
+            font-size: 11px;
+            color: rgba(255,255,255,0.6);
+            text-align: right;
+            margin-top: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 4px;
+        }}
+        .message-wrapper.outgoing .message-time::after {{
+            content: '✓✓';
             color: #58a6ff;
             font-size: 12px;
+        }}
+        .date-divider {{
+            text-align: center;
+            margin: 28px 0;
+            position: relative;
+        }}
+        .date-divider span {{
+            background: rgba(102, 126, 234, 0.15);
+            padding: 8px 20px;
+            border-radius: 16px;
+            font-size: 13px;
+            color: #a0aec0;
+            display: inline-block;
+            font-weight: 500;
+            border: 1px solid rgba(102, 126, 234, 0.2);
+            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+        }}
+        .chat-footer {{
+            background: linear-gradient(135deg, #1a1f2e 0%, #2d3748 100%);
+            padding: 20px 24px;
+            border-top: 1px solid rgba(102, 126, 234, 0.2);
+            text-align: center;
+            color: #8b949e;
+            font-size: 13px;
+        }}
+        .footer-logo {{
+            font-size: 16px;
+            font-weight: 600;
+            color: #667eea;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }}
+        .stats-badge {{
+            display: inline-block;
+            background: linear-gradient(135deg, rgba(102, 126, 234, 0.2) 0%, rgba(118, 75, 162, 0.2) 100%);
+            color: #a0b3ff;
+            padding: 10px 20px;
+            border-radius: 24px;
+            font-weight: 600;
+            margin-top: 10px;
+            border: 1px solid rgba(102, 126, 234, 0.3);
+            box-shadow: 0 2px 8px rgba(102, 126, 234, 0.2);
+        }}
+        @media (max-width: 768px) {{
+            .chat-container {{
+                max-width: 100%;
+            }}
+            .message-bubble {{
+                max-width: 80%;
+            }}
         }}
     </style>
 </head>
 <body>
     <div class="chat-container">
         <div class="chat-header">
-            <h1>💬 Экспорт чата</h1>
-            <p>{chat_name} • {len(messages)} сообщений • {datetime.now().strftime('%d.%m.%Y %H:%M')}</p>
+            <div class="chat-avatar">{chat_name[0].upper()}</div>
+            <div class="chat-info">
+                <div class="chat-name">💬 {chat_name}</div>
+                <div class="chat-status">
+                    <span class="status-dot"></span>
+                    Экспорт чата • {datetime.now().strftime('%d.%m.%Y в %H:%M')}
+                </div>
+            </div>
         </div>
-        <div class="messages">
+        <div class="messages-container">
 """
     
+    last_date = None
     for msg in messages:
-        sender = "Вы" if msg['user_id'] == owner_id else chat_name
-        timestamp = msg['created_at'].strftime('%d.%m.%Y %H:%M')
+        is_owner = msg['user_id'] == owner_id
+        sender_name = "Вы" if is_owner else chat_name
+        wrapper_class = "message-wrapper outgoing" if is_owner else "message-wrapper incoming"
         text = msg['text'] or msg['caption'] or ""
-        media_info = ""
+        media_content = ""
         
+        # Date divider
+        msg_date = msg['created_at'].strftime('%d.%m.%Y')
+        if msg_date != last_date:
+            html_content += f'<div class="date-divider"><span>{msg_date}</span></div>\n'
+            last_date = msg_date
+        
+        # Handle media
         if msg['media_type']:
             media_types = {
-                'photo': '📷 Фото',
-                'video': '🎥 Видео',
-                'document': '📄 Документ',
-                'sticker': '🎭 Стикер',
-                'voice': '🎤 Голосовое',
-                'video_note': '🎬 Видеосообщение',
-                'animation': '🎞 GIF'
+                'photo': '📷 Фото', 'photo_reply': '📷 Фото',
+                'video': '🎥 Видео', 'video_reply': '🎥 Видео',
+                'document': '📄 Документ', 'sticker': '🎭 Стикер',
+                'voice': '🎤 Голосовое', 'video_note': '🎬 Видеосообщение',
+                'animation': '🎬 GIF'
             }
-            media_info = f'<div class="message-media">{media_types.get(msg["media_type"], "📎 Медиа")}</div>'
+            media_content = f'<div class="message-media">{media_types.get(msg["media_type"], "📎 Медиа")}</div>'
+        
+        time_str = msg['created_at'].strftime('%H:%M')
+        avatar_letter = sender_name[0].upper()
+        text_html = f'<div class="message-text">{text}</div>' if text else ''
         
         html_content += f"""
-            <div class="message">
-                <div class="message-header">
-                    <span class="message-sender">{sender}</span>
-                    <span class="message-time">{timestamp}</span>
+            <div class="{wrapper_class}">
+                <div class="message-avatar">{avatar_letter}</div>
+                <div class="message-bubble">
+                    {media_content}
+                    {text_html}
+                    <div class="message-time">{time_str}</div>
                 </div>
-                <div class="message-content">{text if text else '<i>Медиа без подписи</i>'}</div>
-                {media_info}
             </div>
 """
     
-    html_content += """
+    html_content += f"""
+        </div>
+        <div class="chat-footer">
+            <div class="footer-logo">🤖 MessageAssistant Bot</div>
+            <div style="font-size: 12px; color: #6b7280; margin-bottom: 8px;">Экспорт переписки Telegram</div>
+            <div class="stats-badge">📊 Всего сообщений: {len(messages)}</div>
         </div>
     </div>
 </body>
