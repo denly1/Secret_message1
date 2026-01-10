@@ -2695,6 +2695,11 @@ async def main() -> None:
                 "SELECT pg_database_size(current_database())"
             )
             
+            # Get messages table size specifically
+            messages_table_size = await conn.fetchval(
+                "SELECT pg_total_relation_size('messages')"
+            )
+            
             # Get table sizes
             tables_info = await conn.fetch(
                 """
@@ -2752,6 +2757,7 @@ async def main() -> None:
             return f"{bytes_size:.2f} ПБ"
         
         db_size_formatted = format_size(db_size)
+        messages_table_formatted = format_size(messages_table_size)
         media_size_formatted = format_size(media_size)
         total_size = db_size + media_size
         total_size_formatted = format_size(total_size)
@@ -2768,7 +2774,8 @@ async def main() -> None:
         text += f"✅ Свободно: <b>{disk_free_formatted}</b>\n\n"
         
         text += "📊 <b>Данные бота:</b>\n"
-        text += f"💿 База данных: <b>{db_size_formatted}</b>\n"
+        text += f"💿 База данных (общая): <b>{db_size_formatted}</b>\n"
+        text += f"💬 Таблица сообщений: <b>{messages_table_formatted}</b>\n"
         text += f"📁 Медиа файлы: <b>{media_size_formatted}</b> ({media_files_count} файлов)\n"
         text += f"📦 Всего занято ботом: <b>{total_size_formatted}</b>\n\n"
         
