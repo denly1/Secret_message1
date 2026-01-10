@@ -2792,10 +2792,113 @@ async def main() -> None:
         
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin_db_memory")],
+            [InlineKeyboardButton(text="🗑 Очистить старые сообщения", callback_data="admin_cleanup_messages")],
             [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_admin")]
         ])
         
         await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+    
+    @dp.callback_query(F.data == "admin_cleanup_messages")
+    async def callback_admin_cleanup_messages(callback: CallbackQuery):
+        """Show options for cleaning up old messages"""
+        if not await is_admin(callback.from_user.id):
+            await callback.answer("❌ Доступ запрещен")
+            return
+        
+        text = (
+            "🗑 <b>Очистка старых сообщений</b>\n\n"
+            "Выберите период для удаления:\n\n"
+            "⚠️ <b>ВНИМАНИЕ:</b> Это действие необратимо!\n"
+            "Будут удалены сообщения старше выбранного периода.\n\n"
+            "💡 Рекомендуется удалять сообщения старше 30-60 дней"
+        )
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🗑 Старше 7 дней", callback_data="cleanup_7days")],
+            [InlineKeyboardButton(text="🗑 Старше 14 дней", callback_data="cleanup_14days")],
+            [InlineKeyboardButton(text="🗑 Старше 30 дней", callback_data="cleanup_30days")],
+            [InlineKeyboardButton(text="🗑 Старше 60 дней", callback_data="cleanup_60days")],
+            [InlineKeyboardButton(text="🗑 Старше 90 дней", callback_data="cleanup_90days")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="admin_db_memory")]
+        ])
+        
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+        await callback.answer()
+    
+    @dp.callback_query(F.data.startswith("cleanup_"))
+    async def callback_cleanup_execute(callback: CallbackQuery):
+        """Execute cleanup of old messages"""
+        if not await is_admin(callback.from_user.id):
+            await callback.answer("❌ Доступ запрещен")
+            return
+        
+        # Extract days from callback data
+        days_str = callback.data.replace("cleanup_", "").replace("days", "")
+        days = int(days_str)
+        
+        await callback.answer("⏳ Удаляю старые сообщения...")
+        
+        try:
+            async with db_pool.acquire() as conn:
+                # Count messages to be deleted
+                count_before = await conn.fetchval(
+                    f"SELECT COUNT(*) FROM messages WHERE created_at < NOW() - INTERVAL '{days} days'"
+                )
+                
+                # Get size before deletion
+                size_before = await conn.fetchval(
+                    "SELECT pg_total_relation_size('messages')"
+                )
+                
+                # Delete old messages
+                deleted_count = await conn.fetchval(
+                    f"""
+                    WITH deleted AS (
+                        DELETE FROM messages 
+                        WHERE created_at < NOW() - INTERVAL '{days} days'
+                        RETURNING *
+                    )
+                    SELECT COUNT(*) FROM deleted
+                    """
+                )
+                
+                # Vacuum to reclaim space
+                await conn.execute("VACUUM FULL messages")
+                
+                # Get size after deletion
+                size_after = await conn.fetchval(
+                    "SELECT pg_total_relation_size('messages')"
+                )
+                
+                freed_space = size_before - size_after
+                
+                def format_size(bytes_size):
+                    for unit in ['Б', 'КБ', 'МБ', 'ГБ']:
+                        if bytes_size < 1024.0:
+                            return f"{bytes_size:.2f} {unit}"
+                        bytes_size /= 1024.0
+                    return f"{bytes_size:.2f} ТБ"
+                
+                text = (
+                    f"✅ <b>Очистка завершена!</b>\n\n"
+                    f"🗑 Удалено сообщений: <b>{deleted_count:,}</b>\n"
+                    f"💾 Освобождено места: <b>{format_size(freed_space)}</b>\n\n"
+                    f"📊 Удалены сообщения старше <b>{days} дней</b>"
+                )
+                
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="💾 Проверить память", callback_data="admin_db_memory")],
+                    [InlineKeyboardButton(text="◀️ Назад в админку", callback_data="back_to_admin")]
+                ])
+                
+                await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+                
+        except Exception as e:
+            error_text = f"❌ <b>Ошибка при очистке:</b>\n\n{str(e)}"
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="◀️ Назад", callback_data="admin_db_memory")]
+            ])
+            await callback.message.edit_text(error_text, parse_mode="HTML", reply_markup=keyboard)
     
     @dp.callback_query(F.data == "admin_export_chats")
     async def callback_admin_export_chats(callback: CallbackQuery):
