@@ -2839,18 +2839,23 @@ async def main() -> None:
         await callback.answer("⏳ Удаляю старые сообщения...")
         
         try:
+            # Get size before deletion
             async with db_pool.acquire() as conn:
-                # Count messages to be deleted
-                count_before = await conn.fetchval(
-                    f"SELECT COUNT(*) FROM messages WHERE created_at < NOW() - INTERVAL '{days} days'"
-                )
-                
-                # Get size before deletion
                 size_before = await conn.fetchval(
                     "SELECT pg_total_relation_size('messages')"
                 )
                 
-                # Delete old messages
+                # Get file paths of messages to be deleted (for media cleanup)
+                old_messages = await conn.fetch(
+                    f"""
+                    SELECT file_path 
+                    FROM messages 
+                    WHERE created_at < NOW() - INTERVAL '{days} days'
+                    AND file_path IS NOT NULL
+                    """
+                )
+                
+                # Delete old messages and count
                 deleted_count = await conn.fetchval(
                     f"""
                     WITH deleted AS (
@@ -2861,39 +2866,76 @@ async def main() -> None:
                     SELECT COUNT(*) FROM deleted
                     """
                 )
-                
-                # Vacuum to reclaim space
-                await conn.execute("VACUUM FULL messages")
-                
-                # Get size after deletion
+            
+            # Delete associated media files
+            deleted_files = 0
+            freed_media_space = 0
+            for msg in old_messages:
+                if msg['file_path']:
+                    file_path = Path(msg['file_path'])
+                    if file_path.exists():
+                        try:
+                            file_size = file_path.stat().st_size
+                            file_path.unlink()
+                            freed_media_space += file_size
+                            deleted_files += 1
+                        except Exception as e:
+                            print(f"⚠️ Не удалось удалить файл {file_path}: {e}")
+            
+            # VACUUM must be run outside transaction with autocommit
+            # Create a new connection with autocommit for VACUUM
+            import asyncpg
+            vacuum_conn = await asyncpg.connect(
+                host=DB_HOST,
+                port=DB_PORT,
+                database=DB_NAME,
+                user=DB_USER,
+                password=DB_PASSWORD
+            )
+            
+            try:
+                # VACUUM ANALYZE to reclaim space and update statistics
+                await vacuum_conn.execute("VACUUM ANALYZE messages")
+            finally:
+                await vacuum_conn.close()
+            
+            # Get size after deletion and vacuum
+            async with db_pool.acquire() as conn:
                 size_after = await conn.fetchval(
                     "SELECT pg_total_relation_size('messages')"
                 )
-                
-                freed_space = size_before - size_after
-                
-                def format_size(bytes_size):
-                    for unit in ['Б', 'КБ', 'МБ', 'ГБ']:
-                        if bytes_size < 1024.0:
-                            return f"{bytes_size:.2f} {unit}"
-                        bytes_size /= 1024.0
-                    return f"{bytes_size:.2f} ТБ"
-                
-                text = (
-                    f"✅ <b>Очистка завершена!</b>\n\n"
-                    f"🗑 Удалено сообщений: <b>{deleted_count:,}</b>\n"
-                    f"💾 Освобождено места: <b>{format_size(freed_space)}</b>\n\n"
-                    f"📊 Удалены сообщения старше <b>{days} дней</b>"
-                )
-                
-                keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="💾 Проверить память", callback_data="admin_db_memory")],
-                    [InlineKeyboardButton(text="◀️ Назад в админку", callback_data="back_to_admin")]
-                ])
-                
-                await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+            
+            freed_db_space = size_before - size_after
+            total_freed = freed_db_space + freed_media_space
+            
+            def format_size(bytes_size):
+                for unit in ['Б', 'КБ', 'МБ', 'ГБ']:
+                    if bytes_size < 1024.0:
+                        return f"{bytes_size:.2f} {unit}"
+                    bytes_size /= 1024.0
+                return f"{bytes_size:.2f} ТБ"
+            
+            text = (
+                f"✅ <b>Очистка завершена!</b>\n\n"
+                f"🗑 Удалено сообщений: <b>{deleted_count:,}</b>\n"
+                f"📁 Удалено медиа-файлов: <b>{deleted_files}</b>\n\n"
+                f"💾 Освобождено в БД: <b>{format_size(freed_db_space)}</b>\n"
+                f"📂 Освобождено медиа: <b>{format_size(freed_media_space)}</b>\n"
+                f"📊 Всего освобождено: <b>{format_size(total_freed)}</b>\n\n"
+                f"🕒 Удалены сообщения старше <b>{days} дней</b>"
+            )
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="💾 Проверить память", callback_data="admin_db_memory")],
+                [InlineKeyboardButton(text="◀️ Назад в админку", callback_data="back_to_admin")]
+            ])
+            
+            await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
                 
         except Exception as e:
+            import traceback
+            error_details = traceback.format_exc()
+            print(f"❌ Ошибка при очистке: {error_details}")
             error_text = f"❌ <b>Ошибка при очистке:</b>\n\n{str(e)}"
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="◀️ Назад", callback_data="admin_db_memory")]
