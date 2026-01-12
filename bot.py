@@ -2963,6 +2963,10 @@ async def main() -> None:
         await callback.answer("⏳ Удаляю старые сообщения...")
         
         try:
+            # Validate days to prevent SQL injection
+            if not isinstance(days, int) or days <= 0:
+                raise ValueError("Invalid days value")
+            
             # Get size before deletion
             async with db_pool.acquire() as conn:
                 size_before = await conn.fetchval(
@@ -2971,35 +2975,32 @@ async def main() -> None:
                 
                 # Count messages to be deleted
                 count_to_delete = await conn.fetchval(
-                    "SELECT COUNT(*) FROM messages WHERE created_at < NOW() - $1::interval",
-                    f"{days} days"
+                    f"SELECT COUNT(*) FROM messages WHERE created_at < NOW() - INTERVAL '{days} days'"
                 )
                 print(f"📊 Найдено сообщений для удаления: {count_to_delete}")
                 
                 # Get file paths of messages to be deleted (for media cleanup)
                 old_messages = await conn.fetch(
-                    """
+                    f"""
                     SELECT file_path 
                     FROM messages 
-                    WHERE created_at < NOW() - $1::interval
+                    WHERE created_at < NOW() - INTERVAL '{days} days'
                     AND file_path IS NOT NULL
-                    """,
-                    f"{days} days"
+                    """
                 )
                 
                 print(f"📁 Найдено медиа-файлов для удаления: {len(old_messages)}")
                 
                 # Delete old messages and count
                 deleted_count = await conn.fetchval(
-                    """
+                    f"""
                     WITH deleted AS (
                         DELETE FROM messages 
-                        WHERE created_at < NOW() - $1::interval
+                        WHERE created_at < NOW() - INTERVAL '{days} days'
                         RETURNING *
                     )
                     SELECT COUNT(*) FROM deleted
-                    """,
-                    f"{days} days"
+                    """
                 )
                 
                 print(f"✅ Удалено записей из БД: {deleted_count}")
