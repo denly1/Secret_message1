@@ -3003,8 +3003,10 @@ async def main() -> None:
             )
             
             try:
-                # VACUUM ANALYZE to reclaim space and update statistics
-                await vacuum_conn.execute("VACUUM ANALYZE messages")
+                # VACUUM FULL to actually reclaim disk space (slower but frees space)
+                await vacuum_conn.execute("VACUUM FULL messages")
+                # Then ANALYZE to update statistics
+                await vacuum_conn.execute("ANALYZE messages")
             finally:
                 await vacuum_conn.close()
             
