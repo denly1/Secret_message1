@@ -149,17 +149,29 @@ async def check_subscription(user_id: int) -> dict:
 
 
 async def grant_subscription(user_id: int, sub_type: str, days: int) -> None:
-    """Grant subscription to user (admin function)"""
+    """Grant subscription to user (admin function) - adds days to existing subscription"""
     async with db_pool.acquire() as conn:
-        end_date = datetime.now() + timedelta(days=days)
+        # Check if user has active subscription
+        row = await conn.fetchrow(
+            "SELECT end_date, is_active FROM subscriptions WHERE user_id = $1",
+            user_id
+        )
+        
+        if row and row['is_active'] and row['end_date'] > datetime.now():
+            # Add days to existing subscription
+            new_end_date = row['end_date'] + timedelta(days=days)
+        else:
+            # Create new subscription from now
+            new_end_date = datetime.now() + timedelta(days=days)
+        
         await conn.execute(
             """
             INSERT INTO subscriptions (user_id, subscription_type, start_date, end_date, is_active)
             VALUES ($1, $2, NOW(), $3, TRUE)
             ON CONFLICT (user_id) DO UPDATE
-            SET subscription_type = $2, start_date = NOW(), end_date = $3, is_active = TRUE, updated_at = NOW()
+            SET subscription_type = $2, end_date = $3, is_active = TRUE, updated_at = NOW()
             """,
-            user_id, sub_type, end_date
+            user_id, sub_type, new_end_date
         )
 
 
@@ -2945,6 +2957,9 @@ async def main() -> None:
         days_str = callback.data.replace("cleanup_", "").replace("days", "")
         days = int(days_str)
         
+        print(f"🗑 Начинаю очистку сообщений старше {days} дней")
+        print(f"📊 Callback data: {callback.data}")
+        
         await callback.answer("⏳ Удаляю старые сообщения...")
         
         try:
@@ -2954,27 +2969,40 @@ async def main() -> None:
                     "SELECT pg_total_relation_size('messages')"
                 )
                 
+                # Count messages to be deleted
+                count_to_delete = await conn.fetchval(
+                    "SELECT COUNT(*) FROM messages WHERE created_at < NOW() - $1::interval",
+                    f"{days} days"
+                )
+                print(f"📊 Найдено сообщений для удаления: {count_to_delete}")
+                
                 # Get file paths of messages to be deleted (for media cleanup)
                 old_messages = await conn.fetch(
-                    f"""
+                    """
                     SELECT file_path 
                     FROM messages 
-                    WHERE created_at < NOW() - INTERVAL '{days} days'
+                    WHERE created_at < NOW() - $1::interval
                     AND file_path IS NOT NULL
-                    """
+                    """,
+                    f"{days} days"
                 )
+                
+                print(f"📁 Найдено медиа-файлов для удаления: {len(old_messages)}")
                 
                 # Delete old messages and count
                 deleted_count = await conn.fetchval(
-                    f"""
+                    """
                     WITH deleted AS (
                         DELETE FROM messages 
-                        WHERE created_at < NOW() - INTERVAL '{days} days'
+                        WHERE created_at < NOW() - $1::interval
                         RETURNING *
                     )
                     SELECT COUNT(*) FROM deleted
-                    """
+                    """,
+                    f"{days} days"
                 )
+                
+                print(f"✅ Удалено записей из БД: {deleted_count}")
             
             # Delete associated media files
             deleted_files = 0
