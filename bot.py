@@ -2502,6 +2502,7 @@ async def main() -> None:
         
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✅ Выдать подписку", callback_data="admin_grant_sub")],
+            [InlineKeyboardButton(text="🎁 Выдать всем пользователям", callback_data="admin_grant_all")],
             [InlineKeyboardButton(text="❌ Забрать подписку", callback_data="admin_revoke_sub")],
             [InlineKeyboardButton(text="🔍 Проверить подписку", callback_data="admin_check_sub")],
             [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_admin")]
@@ -2569,6 +2570,98 @@ async def main() -> None:
             )
         except:
             await message.answer("❌ Неверный формат. Отправьте число дней.")
+    
+    @dp.callback_query(F.data == "admin_grant_all")
+    async def callback_admin_grant_all(callback: CallbackQuery):
+        """Show options for granting subscription to all users"""
+        if not await is_admin(callback.from_user.id):
+            await callback.answer("❌ Доступ запрещен")
+            return
+        
+        text = (
+            "🎁 <b>Выдать подписку всем пользователям</b>\n\n"
+            "Выберите период подписки:\n\n"
+            "⚠️ <b>ВНИМАНИЕ:</b> Подписка будет выдана ВСЕМ зарегистрированным пользователям!\n\n"
+            "💡 Если у пользователя уже есть активная подписка, дни будут добавлены к текущей."
+        )
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🎁 3 дня", callback_data="grant_all_3days")],
+            [InlineKeyboardButton(text="🎁 5 дней", callback_data="grant_all_5days")],
+            [InlineKeyboardButton(text="🎁 7 дней", callback_data="grant_all_7days")],
+            [InlineKeyboardButton(text="🎁 14 дней", callback_data="grant_all_14days")],
+            [InlineKeyboardButton(text="🎁 30 дней", callback_data="grant_all_30days")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="admin_subscriptions")]
+        ])
+        
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+        await callback.answer()
+    
+    @dp.callback_query(F.data.startswith("grant_all_"))
+    async def callback_grant_all_execute(callback: CallbackQuery):
+        """Execute mass subscription grant to all users"""
+        if not await is_admin(callback.from_user.id):
+            await callback.answer("❌ Доступ запрещен")
+            return
+        
+        # Extract days from callback data
+        days_str = callback.data.replace("grant_all_", "").replace("days", "")
+        days = int(days_str)
+        
+        await callback.answer("⏳ Выдаю подписки всем пользователям...")
+        
+        try:
+            async with db_pool.acquire() as conn:
+                # Get all user IDs
+                users = await conn.fetch("SELECT user_id FROM users WHERE is_authenticated = TRUE")
+                total_users = len(users)
+                
+                if total_users == 0:
+                    await callback.message.edit_text(
+                        "⚠️ <b>Нет пользователей для выдачи подписки</b>\n\n"
+                        "В базе данных нет аутентифицированных пользователей.",
+                        parse_mode="HTML"
+                    )
+                    return
+                
+                # Grant subscription to all users
+                success_count = 0
+                error_count = 0
+                
+                for user_row in users:
+                    user_id = user_row['user_id']
+                    try:
+                        await grant_subscription(user_id, "mass_grant", days)
+                        success_count += 1
+                    except Exception as e:
+                        print(f"❌ Ошибка выдачи подписки пользователю {user_id}: {e}")
+                        error_count += 1
+            
+            text = (
+                f"✅ <b>Массовая выдача подписок завершена!</b>\n\n"
+                f"👥 Всего пользователей: <b>{total_users}</b>\n"
+                f"✅ Успешно выдано: <b>{success_count}</b>\n"
+                f"❌ Ошибок: <b>{error_count}</b>\n\n"
+                f"📅 Период: <b>{days} дней</b>\n\n"
+                f"💡 Все пользователи получили подписку на {days} дней!"
+            )
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="◀️ Назад в управление подписками", callback_data="admin_subscriptions")],
+                [InlineKeyboardButton(text="🏠 В главное меню админки", callback_data="back_to_admin")]
+            ])
+            
+            await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+            
+        except Exception as e:
+            import traceback
+            error_details = traceback.format_exc()
+            print(f"❌ Ошибка при массовой выдаче подписок: {error_details}")
+            error_text = f"❌ <b>Ошибка при массовой выдаче:</b>\n\n{str(e)}"
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="◀️ Назад", callback_data="admin_subscriptions")]
+            ])
+            await callback.message.edit_text(error_text, parse_mode="HTML", reply_markup=keyboard)
     
     @dp.callback_query(F.data == "admin_revoke_sub")
     async def callback_admin_revoke_sub(callback: CallbackQuery, state: FSMContext):
@@ -2741,9 +2834,18 @@ async def main() -> None:
                         media_size += file.stat().st_size
                         media_files_count += 1
             
-            # Get disk space
+            # Get disk space - platform independent
             import shutil
-            disk_usage = shutil.disk_usage("/")
+            import os
+            import platform
+            
+            # Determine root path based on OS
+            if platform.system() == "Windows":
+                root_path = "C:\\"
+            else:
+                root_path = "/"
+            
+            disk_usage = shutil.disk_usage(root_path)
             disk_total = disk_usage.total
             disk_used = disk_usage.used
             disk_free = disk_usage.free
