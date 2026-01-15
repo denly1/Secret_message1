@@ -2954,11 +2954,13 @@ async def main() -> None:
             return
         
         # Extract days from callback data
+        print(f"📊 RAW Callback data: {callback.data}")
         days_str = callback.data.replace("cleanup_", "").replace("days", "")
+        print(f"📊 Extracted days_str: '{days_str}'")
         days = int(days_str)
+        print(f"📊 Parsed days (int): {days}")
         
         print(f"🗑 Начинаю очистку сообщений старше {days} дней")
-        print(f"📊 Callback data: {callback.data}")
         
         await callback.answer("⏳ Удаляю старые сообщения...")
         
