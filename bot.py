@@ -4098,9 +4098,10 @@ async def main() -> None:
         # ===== NOW check subscription for regular message processing =====
         sub_status = await check_subscription(owner_id)
         if not sub_status['active']:
-            print(f"⚠️ У пользователя {owner_id} истекла подписка")
-            # Don't process regular messages, but View Once already processed above
-            return
+            print(
+                f"⚠️ У пользователя {owner_id} истекла подписка — сохраняю сообщение для уведомлений без деталей"
+            )
+            # Не блокируем сохранение: так удалённые/изменённые сообщения будут приходить с кнопкой "Посмотреть"
         
         media_type = None
         file_path = None
